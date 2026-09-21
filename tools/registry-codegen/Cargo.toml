@@ -1,0 +1,20 @@
+[package]
+name = "registry-codegen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Generates per-version registry data for the multiversion plugin from the
+# datapack assets in assets/datapacks/<version>. Mirrors the logic in Pumpkin's
+# own tools/pumpkin-codegen/src/registry.rs so the output matches what the
+# server would have produced before multi-version support was extracted.
+
+[dependencies]
+pumpkin-nbt = { path = "../../../Pumpkin/crates/pumpkin-nbt" }
+pumpkin-data = { path = "../../../Pumpkin/crates/pumpkin-data" }
+serde_json = "1.0"
+indexmap = "2"
+proc-macro2 = "1"
+quote = "1"
+
+[workspace]

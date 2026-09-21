@@ -37,9 +37,6 @@
       },
       "minecraft:login_acknowledged": {
         "protocol_id": 3
-      },
-      "minecraft:cookie_response": {
-        "protocol_id": 4
       }
     },
     "clientbound": {
@@ -60,9 +57,6 @@
       },
       "minecraft:custom_query": {
         "protocol_id": 4
-      },
-      "minecraft:cookie_request": {
-        "protocol_id": 5
       }
     }
   },

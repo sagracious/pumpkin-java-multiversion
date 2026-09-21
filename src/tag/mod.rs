@@ -69,14 +69,14 @@ impl RegistryKey {
     ];
     #[must_use]
     pub const fn is_network_synced(&self) -> bool {
-        match self {
-            Self::VillagerTrade => false,
-            Self::WorldgenConfiguredFeature => false,
-            Self::WorldgenFlatLevelGeneratorPreset => false,
-            Self::WorldgenStructure => false,
-            Self::WorldgenWorldPreset => false,
-            _ => true,
-        }
+        !matches!(
+            self,
+            Self::VillagerTrade
+                | Self::WorldgenConfiguredFeature
+                | Self::WorldgenFlatLevelGeneratorPreset
+                | Self::WorldgenStructure
+                | Self::WorldgenWorldPreset
+        )
     }
     #[must_use]
     pub const fn is_valid_for_version(&self, version: JavaMinecraftVersion) -> bool {
@@ -30600,163 +30600,123 @@ pub mod WorldgenWorldPreset {
 static WORLDGENWORLDPRESET_TAGS: phf::Map<&'static str, &'static Tag> = phf::phf_map! { "minecraft:extended" => & WorldgenWorldPreset :: MINECRAFT_EXTENDED , "minecraft:normal" => & WorldgenWorldPreset :: MINECRAFT_NORMAL };
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_13(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_14(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_15(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_16(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_16_2(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_17(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_18(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_19(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_20(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_20_2(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_2(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_4(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_5(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_6(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_7(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_9(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_1_21_11(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_26_1(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(non_snake_case, unreachable_patterns)]
 const fn get_tags_V_26_2(
-    key: RegistryKey,
+    _key: RegistryKey,
 ) -> Option<&'static phf::Map<&'static str, &'static Tag>> {
-    match key {
-        _ => None,
-    }
+    None
 }
 #[allow(unreachable_patterns)]
 #[must_use]

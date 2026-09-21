@@ -4,20 +4,14 @@ A multi-version Java Edition protocol translation plugin for [Pumpkin](https://g
 
 ## Overview
 
-Pumpkin natively targets the latest Minecraft Java protocol (currently 26.3). This plugin adds backward compatibility for older Minecraft Java Edition clients (1.7.2 through 26.2) by:
-- Intercepting and translating packet IDs and network payloads.
-- Remapping block states, item IDs, sound IDs, entity types, particles, and more across protocol versions.
-- Adapting chunk data formats for older clients (1.7, 1.8, 1.9, 1.18).
-- Providing seamless multi-version connectivity via Pumpkin's WASM plugin system.
+Pumpkin natively targets the latest Minecraft Java protocol (currently 26.3). This plugin lets older Java Edition clients join the same server. It translates packet ids and payloads in both directions, maps block states, item ids and components, sounds, entity types, particles and tags onto the client's own numbering, and rewrites the packet layouts that changed along the way, including the chunk and light formats used below 1.18.
 
 ## Supported Versions
 
-- **1.7.2 - 1.7.10** (Protocols 4, 5)
-- **1.8.x** (Protocol 47)
-- **1.9.x - 1.12.2** (Combat Update through World of Color)
-- **1.13.x - 1.15.2** (The Flattening, Village & Pillage, Buzzy Bees)
-- **1.16.x - 1.20.4** (Nether, Caves & Cliffs, Wild, Trails & Tales)
-- **1.20.5 - 1.21.11** (Armored Paws, Tricky Trials)
-- **26.1 - 26.3**
+26.3 is the server's own version and needs no translation. Clients from 1.16.2 (protocol 751) up to 26.2 are translated. Anything older is refused at login with a message naming the versions the server supports.
 
+## What gets rewritten
 
+Plenty of packets only need their id remapped. Block updates and section block updates, score updates, the status response and the first three fields of `ADD_ENTITY` carry the same bytes all the way down to 1.16.2, so they pass through untouched.
+
+The rest are rewritten per version. There is no configuration state below 1.20.2, so every registry travels as the NBT dimension codec inside the play login packet, which is what `registry` handles. Tags are four fixed lists up to 1.16.5 and a registry-keyed array from 1.17, in `packet::update_tags`. Chunks carry a varint primary bit mask up to 1.16.5 and a bit set on 1.17, with chunk-wide biomes, full NBT block entities and no section biome palette before 1.18; world height is 0 to 255 up to 1.17.1, so sections outside it are cut rather than shifted. That lives in `packet::chunk_remap` and `packet::chunk_legacy`. Below 1.19 living mobs and paintings arrive in their own spawn packets instead of `ADD_ENTITY`, which is what `packet::legacy` covers.

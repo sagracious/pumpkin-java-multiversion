@@ -1,5 +1,6 @@
-/* This file is generated. Do not edit manually. */
 use pumpkin_util::version::JavaMinecraftVersion;
+
+/// No mapping file in the chain renumbers environment attributes.
 #[must_use]
 pub fn remap_environment_attribute_id_for_version(
     environment_attribute_id: u32,

@@ -192,6 +192,8 @@ pub fn remap_living_mob_type_for_version(entity_id: u16, version: JavaMinecraftV
     }
 }
 
+/// `SPAWN_LIVING_ENTITY`, the packet every living mob arrives in before 1.19
+/// (from 1.19 on, `ADD_ENTITY` covers everything).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CSpawnLivingEntity {
     pub entity_id: VarInt,
@@ -381,5 +383,82 @@ impl ClientPacket for CSpawnLivingEntity {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CSpawnLivingEntity;
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_protocol::{ClientPacket, VarInt};
+    use pumpkin_util::{math::vector3::Vector3, version::JavaMinecraftVersion};
+
+    const WRAPPED: &[JavaMinecraftVersion] = &[
+        JavaMinecraftVersion::V_1_16_2,
+        JavaMinecraftVersion::V_1_16_4,
+        JavaMinecraftVersion::V_1_17_1,
+        JavaMinecraftVersion::V_1_18_2,
+    ];
+
+    fn sample() -> CSpawnLivingEntity {
+        CSpawnLivingEntity::new(
+            VarInt(7),
+            uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
+            VarInt(i32::from(EntityType::PIG.id)),
+            Vector3::new(1.5, 65.0, -2.25),
+            0.0,
+            90.0,
+            90.0,
+            Vector3::new(0.0, 0.0, 0.0),
+            None,
+        )
+    }
+
+    #[test]
+    fn layout_matches_minecraft_data_for_1_16_2_to_1_18_2() {
+        for version in WRAPPED {
+            let mut out = Vec::new();
+            sample()
+                .write_packet_data(&mut out, version)
+                .unwrap_or_else(|e| panic!("{version}: {e}"));
+
+            assert_eq!(out.len(), 51, "{version}: unexpected payload length");
+            assert_eq!(out[0], 7, "{version}: entity id");
+            assert_eq!(
+                &out[1..17],
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                "{version}: uuid is not the 16 raw bytes"
+            );
+            assert_eq!(
+                f64::from_be_bytes(out[18..26].try_into().unwrap()),
+                1.5,
+                "{version}: x"
+            );
+            assert_eq!(
+                f64::from_be_bytes(out[26..34].try_into().unwrap()),
+                65.0,
+                "{version}: y"
+            );
+            assert_eq!(
+                f64::from_be_bytes(out[34..42].try_into().unwrap()),
+                -2.25,
+                "{version}: z"
+            );
+            assert_eq!(out[42], 64, "{version}: yaw comes before pitch");
+            assert_eq!(out[43], 0, "{version}: pitch");
+            assert_eq!(out[44], 64, "{version}: head pitch");
+            assert_eq!(&out[45..51], &[0; 6], "{version}: velocity");
+        }
+    }
+
+    #[test]
+    fn no_metadata_tail_from_1_15_up() {
+        let mut with_meta = sample();
+        with_meta.metadata = Some(vec![0xFF].into_boxed_slice());
+        for version in WRAPPED {
+            let mut out = Vec::new();
+            with_meta.write_packet_data(&mut out, version).unwrap();
+            assert_eq!(out.len(), 51, "{version}: metadata leaked into the payload");
+        }
     }
 }
