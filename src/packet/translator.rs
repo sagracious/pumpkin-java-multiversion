@@ -77,6 +77,27 @@ pub const fn from_wasm_java_version(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_dialog_drops_263_payload_for_262_clients() {
+        let translated = PacketTranslator::translate_outgoing_packet(
+            mappings::clientbound::config::CLEAR_DIALOG.v26_3,
+            &[0xAA; 48],
+            JavaMinecraftVersion::V_26_2,
+        )
+        .expect("clear-dialog packet should be mapped for 26.2");
+
+        assert_eq!(
+            translated.0,
+            mappings::clientbound::config::CLEAR_DIALOG.v26_2
+        );
+        assert!(translated.1.is_empty());
+    }
+}
+
 pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[
     &mappings::serverbound::handshake::INTENTION,
 ];
@@ -859,6 +880,14 @@ impl PacketTranslator {
 
         // Generic packet ID translation
         let client_id = Self::translate_clientbound_packet_id(packet_id, version)?;
+
+        // Pumpkin's 26.3 configuration clear-dialog packet has an empty body.
+        // Do not carry any 26.3-side bytes into the older configuration packet:
+        // vanilla 26.2 rejects them as trailing data while decoding the packet.
+        if packet_id == mappings::clientbound::config::CLEAR_DIALOG.v26_3 {
+            return Some((client_id, Vec::new()));
+        }
+
         Some((client_id, raw_payload.to_vec()))
     }
 }
