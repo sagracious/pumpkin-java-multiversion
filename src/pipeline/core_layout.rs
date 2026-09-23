@@ -298,7 +298,8 @@ mod tests {
             let mut payload = Vec::new();
             payload.push(5);
             payload.extend_from_slice(b"Notch");
-            if version >= JavaMinecraftVersion::V_1_19 && version < JavaMinecraftVersion::V_1_19_3 {
+            if version >= JavaMinecraftVersion::V_1_19 && version <= JavaMinecraftVersion::V_1_19_3
+            {
                 payload.push(0);
             }
             if version >= JavaMinecraftVersion::V_1_20_2 {

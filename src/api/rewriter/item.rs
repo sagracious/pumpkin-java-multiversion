@@ -124,14 +124,18 @@ impl StructuredItemRewriter {
                         .iter()
                         .filter_map(|component| {
                             Some(ItemComponent {
-                                id: map(component_ids, component.id)?,
+                                id: map_component_id_from_client(
+                                    component.id,
+                                    source,
+                                    component_ids,
+                                )?,
                                 data: component.data.clone(),
                             })
                         })
                         .collect(),
                     removed: removed
                         .iter()
-                        .filter_map(|id| map(component_ids, *id))
+                        .filter_map(|id| map_component_id_from_client(*id, source, component_ids))
                         .collect(),
                 }
             }
@@ -177,7 +181,7 @@ pub fn read_client_item(
         } else {
             None
         };
-        let native = map(component_ids, client_id)
+        let native = map_component_id_from_client(client_id, version, component_ids)
             .and_then(|id| u8::try_from(id).ok())
             .and_then(DataComponent::try_from_id);
         let Some(native) = native else {
@@ -202,7 +206,7 @@ pub fn read_client_item(
 
     let mut removed = Vec::with_capacity(to_remove as usize);
     for _ in 0..to_remove {
-        if let Some(id) = map(component_ids, r.get_var_int()?.0) {
+        if let Some(id) = map_component_id_from_client(r.get_var_int()?.0, version, component_ids) {
             removed.push(id);
         }
     }
@@ -536,14 +540,14 @@ impl WireType for ClientItemT<'_> {
     }
 }
 
-/// Reads one stack core wrote and writes it back in `layout`'s item form.
+/// Reads one stack in `layout`'s wire form and writes it back for `layout`.
 pub fn rewrite_item(
     input: &mut &[u8],
     output: &mut Vec<u8>,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    let item = ItemT::for_version(V::V_26_3).read(input)?;
+    let item = ClientItemT::new(layout, ids).read(input)?;
     let out = StructuredItemRewriter::to_version(&item, layout, ids);
     ItemT::for_version(layout).write(output, &out)?;
     Ok(())
@@ -563,7 +567,7 @@ pub fn item_pass(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    let item = wrapper.read(&ItemT::for_version(V::V_26_3))?;
+    let item = wrapper.read(&ClientItemT::new(layout, ids))?;
     let out = StructuredItemRewriter::to_version(&item, layout, ids);
     wrapper.write(&ItemT::for_version(layout), &out)
 }
@@ -588,6 +592,13 @@ fn map_component_id(
         return Some(i32::from(DataComponent::AttackAnimation.to_id()));
     }
     map(&ids.data_component_type, id)
+}
+
+pub(crate) fn map_component_id_from_client(id: i32, source: V, inverse: &IdMapping) -> Option<i32> {
+    if source == V::V_26_2 && id == i32::from(DataComponent::AttackAnimation.to_id()) {
+        return Some(i32::from(DataComponent::AttackAnimation.to_id()));
+    }
+    map(inverse, id)
 }
 
 #[cfg(test)]

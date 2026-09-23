@@ -1,6 +1,8 @@
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
-use crate::api::rewriter::item::{ClientItemT, StructuredItemRewriter, item_pass};
+use crate::api::rewriter::item::{
+    ClientItemT, StructuredItemRewriter, item_pass, map_component_id_from_client,
+};
 use crate::api::types::{
     BOOL, F32T, HASHED_ITEM, I8, I16T, I32T, I64T, ITEM_COST, STRING, TEMPLATE_ITEM,
     TextComponentT, U8, VAR_INT,
@@ -290,24 +292,32 @@ pub fn click_container(
     }
     for _ in 0..changed {
         wrapper.passthrough(&I16T)?;
-        clicked(wrapper, ids)?;
+        clicked(wrapper, ids, connection.version)?;
     }
-    clicked(wrapper, ids)
+    clicked(wrapper, ids, connection.version)
 }
 
-fn clicked(wrapper: &mut PacketWrapper, ids: &ComposedMappings) -> Result<(), TranslateError> {
+fn clicked(
+    wrapper: &mut PacketWrapper,
+    ids: &ComposedMappings,
+    source: V,
+) -> Result<(), TranslateError> {
     let hashed = wrapper.read(&HASHED_ITEM)?;
     let out = hashed.and_then(|mut item| {
         item.id = map(ids.items_inverse(), item.id)?;
-        item.added
-            .retain(|(id, _)| map(ids.data_component_type_inverse(), *id).is_some());
+        item.added.retain(|(id, _)| {
+            map_component_id_from_client(*id, source, ids.data_component_type_inverse()).is_some()
+        });
         for entry in &mut item.added {
-            entry.0 = map(ids.data_component_type_inverse(), entry.0)?;
+            entry.0 =
+                map_component_id_from_client(entry.0, source, ids.data_component_type_inverse())?;
         }
         item.removed = item
             .removed
             .iter()
-            .filter_map(|id| map(ids.data_component_type_inverse(), *id))
+            .filter_map(|id| {
+                map_component_id_from_client(*id, source, ids.data_component_type_inverse())
+            })
             .collect();
         Some(item)
     });
@@ -345,9 +355,12 @@ mod tests {
         }
     }
 
-    fn native_bytes(item: &Item) -> Vec<u8> {
+    fn client_bytes(item: &Item, version: V) -> Vec<u8> {
+        let rewritten = StructuredItemRewriter::to_version(item, version, ids(version));
         let mut out = Vec::new();
-        ItemT::for_version(V::V_26_3).write(&mut out, item).unwrap();
+        ItemT::for_version(version)
+            .write(&mut out, &rewritten)
+            .unwrap();
         out
     }
 
@@ -401,9 +414,9 @@ mod tests {
     fn container_content_keeps_its_frame_and_rewrites_every_slot() {
         let layout = V::V_1_21_2;
         let mut payload = vec![3, 9, 2];
-        payload.extend(native_bytes(&native_sword()));
-        payload.extend(native_bytes(&Item::Empty));
-        payload.extend(native_bytes(&Item::Empty));
+        payload.extend(client_bytes(&native_sword(), layout));
+        payload.extend(client_bytes(&Item::Empty, layout));
+        payload.extend(client_bytes(&Item::Empty, layout));
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_CONTENT, &payload);
         let mut connection = UserConnection::new(0, layout);
@@ -442,8 +455,8 @@ mod tests {
             removed: Vec::new(),
         };
         let mut payload = vec![3, 9, 1];
-        payload.extend(native_bytes(&interactable));
-        payload.extend(native_bytes(&Item::Empty));
+        payload.extend(client_bytes(&interactable, layout));
+        payload.extend(client_bytes(&Item::Empty, layout));
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_CONTENT, &payload);
         let mut connection = UserConnection::new(0, layout);
@@ -479,7 +492,7 @@ mod tests {
     fn container_content_on_1_16_has_a_short_count_and_no_carried_item() {
         let layout = V::V_1_16_2;
         let mut payload = vec![3, 0, 1];
-        payload.extend(native_bytes(&native_sword()));
+        payload.extend(client_bytes(&native_sword(), layout));
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_CONTENT, &payload);
         let mut connection = UserConnection::new(0, layout);
@@ -498,7 +511,7 @@ mod tests {
     fn a_container_slot_keeps_the_state_id() {
         let layout = V::V_1_20_2;
         let mut payload = vec![1, 9, 0, 5];
-        payload.extend(native_bytes(&native_sword()));
+        payload.extend(client_bytes(&native_sword(), layout));
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_SLOT, &payload);
         let mut connection = UserConnection::new(0, layout);
@@ -513,9 +526,9 @@ mod tests {
     fn equipment_stops_at_the_terminator() {
         let layout = V::V_1_20_2;
         let mut payload = vec![42, 4 | 0x80];
-        payload.extend(native_bytes(&native_sword()));
+        payload.extend(client_bytes(&native_sword(), layout));
         payload.push(3);
-        payload.extend(native_bytes(&Item::Empty));
+        payload.extend(client_bytes(&Item::Empty, layout));
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::SET_EQUIPMENT, &payload);
         let mut connection = UserConnection::new(0, layout);
@@ -537,9 +550,10 @@ mod tests {
     fn merchant_offers_rewrite_both_cost_forms() {
         let layout = V::V_1_21_2;
         let sword = native_sword();
+        let client_sword = StructuredItemRewriter::to_version(&sword, layout, ids(layout));
         let mut payload = vec![1, 1];
-        ITEM_COST.write(&mut payload, &sword).unwrap();
-        payload.extend(native_bytes(&sword));
+        ITEM_COST.write(&mut payload, &client_sword).unwrap();
+        payload.extend(client_bytes(&sword, layout));
         payload.push(0);
         payload.push(1);
         payload.extend([0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
