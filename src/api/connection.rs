@@ -94,7 +94,8 @@ pub fn remove_connection(key: u64) {
     CONNECTIONS.with_borrow_mut(|connections| connections.remove(&key));
 }
 
-fn player_key(player: &Player) -> u64 {
+#[must_use]
+pub fn player_key(player: &Player) -> u64 {
     let uuid = player.get_id();
     uuid.high.rotate_left(32) ^ uuid.low
 }

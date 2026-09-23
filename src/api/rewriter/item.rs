@@ -37,7 +37,7 @@ impl StructuredItemRewriter {
             };
         }
 
-        let mut out = Vec::with_capacity(added.len());
+        let mut out: Vec<ItemComponent> = Vec::with_capacity(added.len());
         for component in added {
             let Some(native) = u8::try_from(component.id)
                 .ok()

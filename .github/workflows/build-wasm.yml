@@ -23,7 +23,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  PUMPKIN_COMMIT: 923b5264246b34dab26b7d1b75f7b97cbf85c489
+  PUMPKIN_COMMIT: a6d0446b9c065d8573bf3b3ad2d0837209e15d34
   PUMPKIN_TAG: 0.2.0+26.3-26.51
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          repository: Pumpkin-MC/Pumpkin
+          repository: sagracious/Pumpkin
           ref: ${{ env.PUMPKIN_COMMIT }}
           path: Pumpkin
           submodules: recursive
