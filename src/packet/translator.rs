@@ -1,9 +1,11 @@
-use pumpkin_data::entity::EntityType;
+use pumpkin_data::{entity::EntityType, item::Item};
 use pumpkin_protocol::{
-    ClientPacket, MultiVersionJavaPacket, VarInt,
-    java::client::play::CSpawnEntity,
+    ClientPacket, MultiVersionJavaPacket, ServerPacket, VarInt,
+    codec::item_stack_seralizer::ItemStackSerializer,
+    java::client::play::{CSetContainerContent, CSpawnEntity},
 };
 use pumpkin_util::{math::position::BlockPos, version::JavaMinecraftVersion};
+use std::borrow::Cow;
 
 use crate::packet::legacy::{
     CSpawnLivingEntity, CSpawnPainting,
@@ -13,6 +15,48 @@ use crate::remap::{
     self, block_state_remap::remap_block_state_for_version,
     entity_id_remap::remap_object_type_for_version,
 };
+
+fn remap_item_stack_for_version(
+    stack: &ItemStackSerializer<'_>,
+    version: JavaMinecraftVersion,
+) -> ItemStackSerializer<'static> {
+    let mut item = stack.0.as_ref().clone();
+    if !item.is_empty() {
+        let item_id = remap::item_id_remap::remap_item_id_for_version(item.item.id, version);
+        if let Some(target_item) = Item::from_id(item_id) {
+            item.item = target_item;
+        }
+    }
+    ItemStackSerializer(Cow::Owned(item))
+}
+
+/// Re-encode the modern container-content packet for the target client. The
+/// protocol shape is shared by 26.2/26.3, but item registry IDs are not; a
+/// typed round trip keeps this family aligned with ViaBackwards' item rewrite.
+fn translate_container_content(
+    raw_payload: &[u8],
+    version: JavaMinecraftVersion,
+) -> Option<Vec<u8>> {
+    let mut input = raw_payload;
+    let packet = CSetContainerContent::read(&mut input, &JavaMinecraftVersion::V_26_3).ok()?;
+    let slots: Vec<ItemStackSerializer<'static>> = packet
+        .slot_data
+        .iter()
+        .map(|stack| remap_item_stack_for_version(stack, version))
+        .collect();
+    let carried = remap_item_stack_for_version(packet.carried_item, version);
+    let translated = CSetContainerContent::new(
+        packet.window_id,
+        packet.state_id,
+        &slots,
+        &carried,
+    );
+    let mut output = Vec::new();
+    translated
+        .write_packet_data(&mut output, &version)
+        .ok()
+        .map(|()| output)
+}
 
 /// Converts the WIT-generated `JavaMinecraftVersion` into the internal `pumpkin_util` version.
 #[must_use]
@@ -771,6 +815,15 @@ impl PacketTranslator {
     ) -> Option<(i32, Vec<u8>)> {
         if version == JavaMinecraftVersion::V_26_3 {
             return None;
+        }
+
+        if packet_id == mappings::clientbound::play::CONTAINER_SET_CONTENT.v26_3 {
+            if let Some(payload) = translate_container_content(raw_payload, version) {
+                return Some((
+                    mappings::clientbound::play::CONTAINER_SET_CONTENT.to_id(version),
+                    payload,
+                ));
+            }
         }
 
         // Check for CSpawnEntity (ADD_ENTITY) in 26.3
