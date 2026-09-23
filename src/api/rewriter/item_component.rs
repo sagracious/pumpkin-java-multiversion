@@ -26,7 +26,9 @@ impl<T> IntoReading<T> for Result<T, pumpkin_protocol::ser::WritingError> {
 pub fn shape_floor(component: DataComponent) -> V {
     use DataComponent as C;
     match component {
-        C::AttributeModifiers | C::JukeboxPlayable => V::V_26_2,
+        C::AttributeModifiers | C::JukeboxPlayable | C::AttackAnimation | C::InteractAnimation => {
+            V::V_26_2
+        }
         C::EntityData | C::BlockEntityData | C::Profile => V::V_1_21_9,
         C::Equippable => V::V_1_21_6,
         C::Unbreakable
@@ -191,11 +193,14 @@ fn copy_sound_holder(cursor: &mut &[u8], out: &mut Vec<u8>) -> Result<(), Readin
 
 fn copy_id_set(cursor: &mut &[u8], out: &mut Vec<u8>) -> Result<(), ReadingError> {
     let n = cursor.get_var_int()?;
+    if n.0 < 0 {
+        return Err(ReadingError::Message("negative id-set length".into()));
+    }
     out.write_var_int(&n).r()?;
     if n.0 == 0 {
         out.write_string(&cursor.get_str()?).r()?;
     } else {
-        for _ in 0..n.0 - 1 {
+        for _ in 1..n.0 {
             out.write_var_int(&cursor.get_var_int()?).r()?;
         }
     }
@@ -396,6 +401,7 @@ fn map(mapping: &crate::api::IdMapping, id: i32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::VAR_INT;
 
     fn ids() -> &'static ComposedMappings {
         crate::api::MappingData::get().composed(V::V_26_3)
@@ -457,5 +463,16 @@ mod tests {
             to_version(DataComponent::Instrument, &[0], V::V_26_2, ids()),
             None
         );
+    }
+
+    #[test]
+    fn negative_id_set_lengths_are_rejected() {
+        for count in [-1, i32::MIN] {
+            let mut payload = Vec::new();
+            VAR_INT.write(&mut payload, &VarInt(count)).unwrap();
+            let mut cursor = payload.as_slice();
+            let mut output = Vec::new();
+            assert!(copy_id_set(&mut cursor, &mut output).is_err());
+        }
     }
 }

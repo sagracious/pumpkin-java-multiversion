@@ -15,3 +15,7 @@ Pumpkin natively targets the latest Minecraft Java protocol (currently 26.3). Th
 Plenty of packets only need their id remapped. Block updates and section block updates, score updates, the status response and the first three fields of `ADD_ENTITY` carry the same bytes all the way down to 1.16.2, so they pass through untouched.
 
 The rest are rewritten per version. There is no configuration state below 1.20.2, so every registry travels as the NBT dimension codec inside the play login packet, which is what `registry` handles. Tags are four fixed lists up to 1.16.5 and a registry-keyed array from 1.17, in `packet::update_tags`. Chunks carry a varint primary bit mask up to 1.16.5 and a bit set on 1.17, with chunk-wide biomes, full NBT block entities and no section biome palette before 1.18; world height is 0 to 255 up to 1.17.1, so sections outside it are cut rather than shifted. That lives in `packet::chunk_remap` and `packet::chunk_legacy`. Below 1.19 living mobs and paintings arrive in their own spawn packets instead of `ADD_ENTITY`, which is what `packet::legacy` covers.
+
+## Licensing
+
+This plugin is distributed under GPL-3.0-only. Third-party mapping data and attribution are listed in [`assets/NOTICE.md`](assets/NOTICE.md); the GPL text is in [`LICENSE`](LICENSE).

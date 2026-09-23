@@ -324,7 +324,7 @@ pub const fn shape(component: DataComponent) -> &'static Shape {
         C::BlocksAttacks => &BLOCKS_ATTACKS,
         C::PiercingWeapon => &PIERCING_WEAPON,
         C::KineticWeapon => &KINETIC_WEAPON,
-        C::AttackAnimation => &SWING_ANIMATION,
+        C::AttackAnimation | C::InteractAnimation => &SWING_ANIMATION,
         C::ChargedProjectiles | C::BundleContents => &Shape::Array(&TEMPLATE),
         C::PotionContents => &POTION_CONTENTS,
         C::WritableBookContent => &WRITABLE_BOOK,
@@ -350,8 +350,7 @@ pub const fn shape(component: DataComponent) -> &'static Shape {
         | C::SignTextFront
         | C::SignTextBack
         | C::Waxed
-        | C::CushionColor
-        | C::InteractAnimation => &Shape::Absent,
+        | C::CushionColor => &Shape::Absent,
     }
 }
 

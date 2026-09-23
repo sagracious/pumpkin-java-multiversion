@@ -39,29 +39,47 @@ impl StructuredItemRewriter {
 
         let mut out = Vec::with_capacity(added.len());
         for component in added {
-            let Some(mapped) = map(&ids.data_component_type, component.id) else {
-                continue;
-            };
             let Some(native) = u8::try_from(component.id)
                 .ok()
                 .and_then(DataComponent::try_from_id)
             else {
                 continue;
             };
+            let Some(mapped) = map_component_id(component.id, native, target, ids) else {
+                continue;
+            };
             let Some(data) = item_component::to_version(native, &component.data, target, ids)
             else {
                 continue;
             };
-            out.push(ItemComponent { id: mapped, data });
+            if let Some(existing) = out.iter_mut().find(|existing| existing.id == mapped) {
+                // 26.2 has one animation component where 26.3 has separate
+                // attack and interaction components. Keep the later value,
+                // matching ViaBackwards' collision behavior.
+                existing.data = data;
+            } else {
+                out.push(ItemComponent { id: mapped, data });
+            }
+        }
+        let mut mapped_removed = Vec::with_capacity(removed.len());
+        for component_id in removed {
+            let native = u8::try_from(*component_id)
+                .ok()
+                .and_then(DataComponent::try_from_id);
+            let mapped = native
+                .and_then(|native| map_component_id(*component_id, native, target, ids))
+                .or_else(|| map(&ids.data_component_type, *component_id));
+            if let Some(mapped) = mapped
+                && !mapped_removed.contains(&mapped)
+            {
+                mapped_removed.push(mapped);
+            }
         }
         Item::Structured {
             count: *count,
             id,
             added: out,
-            removed: removed
-                .iter()
-                .filter_map(|id| map(&ids.data_component_type, *id))
-                .collect(),
+            removed: mapped_removed,
         }
     }
 
@@ -287,10 +305,13 @@ fn native_enchantments(native: &[u8], enchantments: &IdMapping) -> Result<Vec<u8
 
 fn skip_id_set(r: &mut &[u8]) -> Result<(), ReadingError> {
     let n = r.get_var_int()?.0;
+    if n < 0 {
+        return Err(ReadingError::Message("negative id-set length".into()));
+    }
     if n == 0 {
         r.get_str()?;
     } else {
-        for _ in 0..n - 1 {
+        for _ in 1..n {
             r.get_var_int()?;
         }
     }
@@ -552,6 +573,23 @@ fn map(mapping: &IdMapping, id: i32) -> Option<i32> {
     i32::try_from(mapping.map(id)?).ok()
 }
 
+fn map_component_id(
+    id: i32,
+    component: DataComponent,
+    target: V,
+    ids: &ComposedMappings,
+) -> Option<i32> {
+    if target == V::V_26_2
+        && matches!(
+            component,
+            DataComponent::AttackAnimation | DataComponent::InteractAnimation
+        )
+    {
+        return Some(i32::from(DataComponent::AttackAnimation.to_id()));
+    }
+    map(&ids.data_component_type, id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +769,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interact_animation_uses_the_shared_26_2_component_and_shape() {
+        let target = V::V_26_2;
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id),
+            added: vec![ItemComponent {
+                id: i32::from(DataComponent::InteractAnimation.to_id()),
+                data: vec![1, 6],
+            }],
+            removed: Vec::new(),
+        };
+
+        let mut native_bytes = Vec::new();
+        ItemT::for_version(V::V_26_3)
+            .write(&mut native_bytes, &native)
+            .unwrap();
+        let mut native_reader: &[u8] = &native_bytes;
+        let decoded = ItemT::for_version(V::V_26_3)
+            .read(&mut native_reader)
+            .unwrap();
+        assert!(native_reader.is_empty());
+
+        let downgraded = StructuredItemRewriter::to_version(&decoded, target, ids(target));
+        let Item::Structured { added, .. } = &downgraded else {
+            panic!("structured");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id())
+        );
+        assert_eq!(added[0].data, vec![1, 6]);
+
+        let mut target_bytes = Vec::new();
+        ItemT::for_version(target)
+            .write(&mut target_bytes, &downgraded)
+            .unwrap();
+        let mut target_reader: &[u8] = &target_bytes;
+        let target_item = ItemT::for_version(target).read(&mut target_reader).unwrap();
+        assert!(target_reader.is_empty());
+        let Item::Structured { added, .. } = target_item else {
+            panic!("structured");
+        };
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id())
+        );
+        assert_eq!(added[0].data, vec![1, 6]);
+
+        let mut client_reader: &[u8] = &target_bytes;
+        let native = read_client_item(&mut client_reader, target, false, ids(target)).unwrap();
+        assert!(client_reader.is_empty());
+        let Item::Structured { added, .. } = native else {
+            panic!("structured");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id())
+        );
+        assert_eq!(added[0].data, vec![1, 6]);
+    }
+
+    #[test]
+    fn attack_and_interact_animation_collapse_without_duplicate_ids() {
+        let target = V::V_26_2;
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id),
+            added: vec![
+                ItemComponent {
+                    id: i32::from(DataComponent::AttackAnimation.to_id()),
+                    data: vec![0, 4],
+                },
+                ItemComponent {
+                    id: i32::from(DataComponent::InteractAnimation.to_id()),
+                    data: vec![1, 6],
+                },
+            ],
+            removed: vec![
+                i32::from(DataComponent::AttackAnimation.to_id()),
+                i32::from(DataComponent::InteractAnimation.to_id()),
+            ],
+        };
+
+        let downgraded = StructuredItemRewriter::to_version(&native, target, ids(target));
+        let Item::Structured { added, removed, .. } = downgraded else {
+            panic!("structured");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id())
+        );
+        assert_eq!(added[0].data, vec![1, 6]);
+        assert_eq!(
+            removed,
+            vec![i32::from(DataComponent::AttackAnimation.to_id())]
+        );
+    }
+
     /// `weapon` arrives in 1.21.5, so the 1.20.5 table has no id for it and
     /// the component must not be sent under someone else's.
     #[test]
@@ -852,5 +992,15 @@ mod tests {
                 .iter()
                 .any(|c| c.id == i32::from(DataComponent::Enchantments.to_id()))
         );
+    }
+
+    #[test]
+    fn negative_client_id_set_lengths_are_rejected() {
+        for count in [-1, i32::MIN] {
+            let mut payload = Vec::new();
+            VAR_INT.write(&mut payload, &VarInt(count)).unwrap();
+            let mut cursor = payload.as_slice();
+            assert!(skip_id_set(&mut cursor).is_err());
+        }
     }
 }

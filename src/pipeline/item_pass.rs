@@ -429,6 +429,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn container_content_translates_interact_animation_for_26_2() {
+        let layout = V::V_26_2;
+        let interactable = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id),
+            added: vec![ItemComponent {
+                id: i32::from(DataComponent::InteractAnimation.to_id()),
+                data: vec![1, 6],
+            }],
+            removed: Vec::new(),
+        };
+        let mut payload = vec![3, 9, 1];
+        payload.extend(native_bytes(&interactable));
+        payload.extend(native_bytes(&Item::Empty));
+
+        let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_CONTENT, &payload);
+        let mut connection = UserConnection::new(0, layout);
+        container_content(&mut wrapper, &mut connection, layout, ids(layout)).unwrap();
+        let out = wrapper.finish().unwrap().unwrap().payload;
+
+        let mut read: &[u8] = &out;
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 3);
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 9);
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 1);
+        let item = ItemT::for_version(layout).read(&mut read).unwrap();
+        let Item::Structured { added, .. } = item else {
+            panic!("structured");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id())
+        );
+        assert_eq!(added[0].data, vec![1, 6]);
+        assert!(
+            ItemT::for_version(layout)
+                .read(&mut read)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(read.is_empty());
+    }
+
     /// `md('1.16.5').protocol.play.toClient.packet_window_items`: one byte of
     /// window id, a Short slot count and no carried item.
     #[test]

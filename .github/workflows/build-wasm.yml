@@ -1,0 +1,72 @@
+name: Build Pumpkin Java multiversion WASM
+
+on:
+  push:
+    branches: ["master", "fix/**"]
+    paths:
+      - "src/**"
+      - "assets/**"
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/build-wasm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pjm-wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PUMPKIN_COMMIT: 923b5264246b34dab26b7d1b75f7b97cbf85c489
+  PUMPKIN_TAG: 0.2.0+26.3-26.51
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pumpkin-java-multiversion
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Pumpkin-MC/Pumpkin
+          ref: ${{ env.PUMPKIN_COMMIT }}
+          path: Pumpkin
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pumpkin-java-multiversion -> target
+          shared-key: pjm-wasm-pumpkin-0.2-rust-1.98
+      - name: Build WASM
+        working-directory: pumpkin-java-multiversion
+        run: |
+          cargo generate-lockfile
+          cargo test --lib --locked
+          cargo build --release --locked --target wasm32-wasip2
+      - name: Package artifact
+        shell: bash
+        run: |
+          wasm=pumpkin-java-multiversion/target/wasm32-wasip2/release/pumpkin_java_multiversion.wasm
+          test -s "$wasm"
+          mkdir -p dist
+          cp "$wasm" dist/pumpkin-java-multiversion-${{ github.sha }}.wasm
+          sha256sum dist/* > dist/SHA256SUMS
+          printf 'source=%s\npumpkin=%s\ntarget=wasm32-wasip2\n' "${{ github.sha }}" "$PUMPKIN_COMMIT" > dist/SOURCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pumpkin-java-multiversion-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
