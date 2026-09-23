@@ -1,6 +1,6 @@
 use pumpkin_data::{
     data_component::DataComponent, data_component_impl::DataComponentImpl, entity::EntityType,
-    item::Item,
+    item::Item, item_stack::ItemStack,
 };
 use pumpkin_protocol::{
     ClientPacket, MultiVersionJavaPacket, VarInt,
@@ -19,10 +19,10 @@ use crate::remap::{
 };
 
 fn remap_item_stack_for_version(
-    stack: &ItemStackSerializer<'_>,
+    stack: &ItemStack,
     version: JavaMinecraftVersion,
 ) -> Option<ItemStackSerializer<'static>> {
-    let mut item = stack.0.as_ref().clone();
+    let mut item = stack.clone();
     if !item.is_empty() {
         let item_id = remap::item_id_remap::remap_item_id_for_version(item.item.id, version);
         item.item = Item::from_id(item_id)?;
@@ -220,7 +220,7 @@ mod container_content_tests {
             ItemStackSerializer::read_with_version(&mut target, &JavaMinecraftVersion::V_26_2)
                 .unwrap();
         assert_eq!(item.0.patch.len(), 1);
-        assert_eq!(item.0.patch[0].0, DataComponent::AttackAnimation);
+        assert!(item.0.patch[0].0 == DataComponent::AttackAnimation);
         let _carried =
             ItemStackSerializer::read_with_version(&mut target, &JavaMinecraftVersion::V_26_2)
                 .unwrap();
