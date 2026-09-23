@@ -1,15 +1,17 @@
-use pumpkin_data::{entity::EntityType, item::Item};
+use pumpkin_data::{
+    data_component::DataComponent, data_component_impl::DataComponentImpl, entity::EntityType,
+    item::Item,
+};
 use pumpkin_protocol::{
-    ClientPacket, MultiVersionJavaPacket, ServerPacket, VarInt,
+    ClientPacket, MultiVersionJavaPacket, VarInt,
     codec::item_stack_seralizer::ItemStackSerializer,
-    java::client::play::{CSetContainerContent, CSpawnEntity},
+    java::client::play::CSpawnEntity,
+    ser::{NetworkReadExt, NetworkWriteExt},
 };
 use pumpkin_util::{math::position::BlockPos, version::JavaMinecraftVersion};
 use std::borrow::Cow;
 
-use crate::packet::legacy::{
-    CSpawnLivingEntity, CSpawnPainting,
-};
+use crate::packet::legacy::{CSpawnLivingEntity, CSpawnPainting};
 use crate::packet::mappings::{self, PacketId};
 use crate::remap::{
     self, block_state_remap::remap_block_state_for_version,
@@ -19,15 +21,94 @@ use crate::remap::{
 fn remap_item_stack_for_version(
     stack: &ItemStackSerializer<'_>,
     version: JavaMinecraftVersion,
-) -> ItemStackSerializer<'static> {
+) -> Option<ItemStackSerializer<'static>> {
     let mut item = stack.0.as_ref().clone();
     if !item.is_empty() {
         let item_id = remap::item_id_remap::remap_item_id_for_version(item.item.id, version);
-        if let Some(target_item) = Item::from_id(item_id) {
-            item.item = target_item;
+        item.item = Item::from_id(item_id)?;
+    }
+    Some(ItemStackSerializer(Cow::Owned(item)))
+}
+
+fn write_item_stack_for_version(
+    stack: &ItemStackSerializer<'_>,
+    version: JavaMinecraftVersion,
+    write: &mut Vec<u8>,
+) -> Option<()> {
+    let stack = stack.0.as_ref();
+    if stack.is_empty() {
+        write.write_var_int(&VarInt(0)).ok()?;
+        return Some(());
+    }
+
+    // Below 1.20.5, container slots use the legacy item format and have no
+    // data-component section. Let Pumpkin's version codec handle that format.
+    if version < JavaMinecraftVersion::V_1_20_5 {
+        return remap_item_stack_for_version(stack, version)?
+            .write_with_version(write, &version)
+            .ok();
+    }
+
+    let item_id = remap::item_id_remap::remap_item_id_for_version(stack.item.id, version);
+    write
+        .write_var_int(&VarInt(i32::from(stack.item_count)))
+        .ok()?;
+    write.write_var_int(&VarInt(i32::from(item_id))).ok()?;
+
+    let mut additions: Vec<(u32, DataComponent, &dyn DataComponentImpl)> = Vec::new();
+    let mut removals: Vec<u32> = Vec::new();
+    for (component, value) in &stack.patch {
+        let source_id = u32::from(component.to_id());
+        let target_id = match component {
+            // 26.2 has one swing_animation component; 26.3 split it into the
+            // attack_animation and interact_animation keys. ViaBackwards
+            // replaces both with the older shared key, with the later value
+            // taking precedence when a stack contains both.
+            DataComponent::AttackAnimation | DataComponent::InteractAnimation
+                if version == JavaMinecraftVersion::V_26_2 =>
+            {
+                40
+            }
+            _ => remap::data_component_type_id_remap::remap_data_component_type_id_for_version(
+                source_id, version,
+            ),
+        };
+
+        if target_id == 0 && *component != DataComponent::CustomData {
+            // ViaBackwards drops 26.3-only data keys without a 26.2 equivalent.
+            continue;
+        }
+
+        if let Some(value) = value {
+            if let Some(existing) = additions.iter_mut().find(|entry| entry.0 == target_id) {
+                *existing = (target_id, *component, value.as_ref());
+            } else {
+                additions.push((target_id, *component, value.as_ref()));
+            }
+        } else if !removals.contains(&target_id) {
+            removals.push(target_id);
         }
     }
-    ItemStackSerializer(Cow::Owned(item))
+
+    write
+        .write_var_int(&VarInt(i32::try_from(additions.len()).ok()?))
+        .ok()?;
+    write
+        .write_var_int(&VarInt(i32::try_from(removals.len()).ok()?))
+        .ok()?;
+
+    for (target_id, source_component, value) in additions {
+        write
+            .write_var_int(&VarInt(i32::try_from(target_id).ok()?))
+            .ok()?;
+        pumpkin_protocol::codec::data_component::serialize(source_component, value, write).ok()?;
+    }
+    for target_id in removals {
+        write
+            .write_var_int(&VarInt(i32::try_from(target_id).ok()?))
+            .ok()?;
+    }
+    Some(())
 }
 
 /// Re-encode the modern container-content packet for the target client. The
@@ -38,24 +119,113 @@ fn translate_container_content(
     version: JavaMinecraftVersion,
 ) -> Option<Vec<u8>> {
     let mut input = raw_payload;
-    let packet = CSetContainerContent::read(&mut input, &JavaMinecraftVersion::V_26_3).ok()?;
-    let slots: Vec<ItemStackSerializer<'static>> = packet
-        .slot_data
-        .iter()
-        .map(|stack| remap_item_stack_for_version(stack, version))
-        .collect();
-    let carried = remap_item_stack_for_version(packet.carried_item, version);
-    let translated = CSetContainerContent::new(
-        packet.window_id,
-        packet.state_id,
-        &slots,
-        &carried,
-    );
+    let source_version = JavaMinecraftVersion::V_26_3;
+    let window_id = input.get_container_id(&source_version).ok()?;
+    let state_id = input.get_var_int().ok()?;
+    let slot_count = input.get_var_int().ok()?.0;
+    if !(0..=4096).contains(&slot_count) {
+        return None;
+    }
+    let mut slots = Vec::with_capacity(slot_count as usize);
+    for _ in 0..slot_count {
+        slots.push(ItemStackSerializer::read_with_version(&mut input, &source_version).ok()?);
+    }
+    let carried = ItemStackSerializer::read_with_version(&mut input, &source_version).ok()?;
+    if !input.is_empty() {
+        return None;
+    }
+
     let mut output = Vec::new();
-    translated
-        .write_packet_data(&mut output, &version)
-        .ok()
-        .map(|()| output)
+    output.write_container_id(&window_id, &version).ok()?;
+    output.write_var_int(&state_id).ok()?;
+    output
+        .write_var_int(&VarInt(i32::try_from(slots.len()).ok()?))
+        .ok()?;
+    for stack in &slots {
+        write_item_stack_for_version(stack, version, &mut output)?;
+    }
+    write_item_stack_for_version(&carried, version, &mut output)?;
+    Some(output)
+}
+
+#[cfg(test)]
+mod container_content_tests {
+    use super::*;
+
+    #[test]
+    fn empty_container_content_round_trips_from_26_3_to_26_2() {
+        let source_version = JavaMinecraftVersion::V_26_3;
+        let mut source = Vec::new();
+        source
+            .write_container_id(&VarInt(1), &source_version)
+            .unwrap();
+        source.write_var_int(&VarInt(7)).unwrap(); // State ID
+        source.write_var_int(&VarInt(2)).unwrap(); // Two slots
+        source.write_var_int(&VarInt(0)).unwrap(); // Empty slot
+        source.write_var_int(&VarInt(0)).unwrap(); // Empty slot
+        source.write_var_int(&VarInt(0)).unwrap(); // Empty carried item
+
+        let translated =
+            translate_container_content(&source, JavaMinecraftVersion::V_26_2).unwrap();
+        assert_eq!(translated, source);
+    }
+
+    #[test]
+    fn malformed_container_content_is_not_rewritten() {
+        assert!(translate_container_content(&[1], JavaMinecraftVersion::V_26_2).is_none());
+    }
+
+    #[test]
+    fn container_content_rejects_trailing_bytes() {
+        let source_version = JavaMinecraftVersion::V_26_3;
+        let mut source = Vec::new();
+        source
+            .write_container_id(&VarInt(0), &source_version)
+            .unwrap();
+        source.write_var_int(&VarInt(0)).unwrap(); // State ID
+        source.write_var_int(&VarInt(0)).unwrap(); // No slots
+        source.write_var_int(&VarInt(0)).unwrap(); // Empty carried item
+        source.push(0xff);
+
+        assert!(translate_container_content(&source, JavaMinecraftVersion::V_26_2).is_none());
+    }
+
+    #[test]
+    fn interact_animation_downgrades_to_the_shared_swing_component() {
+        let source_version = JavaMinecraftVersion::V_26_3;
+        let mut source = Vec::new();
+        source
+            .write_container_id(&VarInt(1), &source_version)
+            .unwrap();
+        source.write_var_int(&VarInt(7)).unwrap(); // State ID
+        source.write_var_int(&VarInt(1)).unwrap(); // One slot
+        source.write_var_int(&VarInt(1)).unwrap(); // Item count
+        source.write_var_int(&VarInt(1)).unwrap(); // Item ID
+        source.write_var_int(&VarInt(1)).unwrap(); // One added component
+        source.write_var_int(&VarInt(0)).unwrap(); // No removed components
+        source.write_var_int(&VarInt(41)).unwrap(); // 26.3 interact_animation
+        source.write_var_int(&VarInt(1)).unwrap(); // Stab
+        source.write_var_int(&VarInt(6)).unwrap(); // Duration
+        source.write_var_int(&VarInt(0)).unwrap(); // Empty carried item
+
+        let translated =
+            translate_container_content(&source, JavaMinecraftVersion::V_26_2).unwrap();
+        let mut target = translated.as_slice();
+        let _window_id = target
+            .get_container_id(&JavaMinecraftVersion::V_26_2)
+            .unwrap();
+        let _state_id = target.get_var_int().unwrap();
+        assert_eq!(target.get_var_int().unwrap().0, 1);
+        let item =
+            ItemStackSerializer::read_with_version(&mut target, &JavaMinecraftVersion::V_26_2)
+                .unwrap();
+        assert_eq!(item.0.patch.len(), 1);
+        assert_eq!(item.0.patch[0].0, DataComponent::AttackAnimation);
+        let _carried =
+            ItemStackSerializer::read_with_version(&mut target, &JavaMinecraftVersion::V_26_2)
+                .unwrap();
+        assert!(target.is_empty());
+    }
 }
 
 /// Converts the WIT-generated `JavaMinecraftVersion` into the internal `pumpkin_util` version.
@@ -121,9 +291,7 @@ pub const fn from_wasm_java_version(
     }
 }
 
-pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[
-    &mappings::serverbound::handshake::INTENTION,
-];
+pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[&mappings::serverbound::handshake::INTENTION];
 
 pub static SERVERBOUND_STATUS: &[&PacketId] = &[
     &mappings::serverbound::status::PING_REQUEST,
@@ -450,7 +618,10 @@ pub struct PacketTranslator;
 impl PacketTranslator {
     /// Translates an incoming serverbound packet ID from a specific client version into the 26.3 packet ID.
     #[must_use]
-    pub fn translate_serverbound_packet_id(packet_id: i32, version: JavaMinecraftVersion) -> Option<i32> {
+    pub fn translate_serverbound_packet_id(
+        packet_id: i32,
+        version: JavaMinecraftVersion,
+    ) -> Option<i32> {
         if version == JavaMinecraftVersion::V_26_3 {
             return Some(packet_id);
         }
@@ -484,7 +655,10 @@ impl PacketTranslator {
 
     /// Translates an outgoing 26.3 clientbound packet ID into the target client version packet ID.
     #[must_use]
-    pub fn translate_clientbound_packet_id(packet_id_26_3: i32, version: JavaMinecraftVersion) -> Option<i32> {
+    pub fn translate_clientbound_packet_id(
+        packet_id_26_3: i32,
+        version: JavaMinecraftVersion,
+    ) -> Option<i32> {
         if version == JavaMinecraftVersion::V_26_3 {
             return Some(packet_id_26_3);
         }
@@ -574,7 +748,8 @@ impl PacketTranslator {
     /// Translates a custom stat ID from 26.3 to the client's version.
     #[must_use]
     pub fn translate_custom_stat_id(stat_id: u16, version: JavaMinecraftVersion) -> u16 {
-        remap::custom_stat_id_remap::remap_custom_stat_id_for_version(u32::from(stat_id), version) as u16
+        remap::custom_stat_id_remap::remap_custom_stat_id_for_version(u32::from(stat_id), version)
+            as u16
     }
 
     /// Translates a painting variant ID from 26.3 to the client's version.
@@ -614,7 +789,9 @@ impl PacketTranslator {
         }
 
         // 2. ACCEPT_TELEPORTATION (< 26.3 only sent teleport_id: VarInt)
-        if new_id == mappings::serverbound::play::ACCEPT_TELEPORTATION.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::ACCEPT_TELEPORTATION.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let teleport_id = payload.get_var_int().ok()?;
             let mut out = Vec::new();
             let _ = out.write_var_int(&teleport_id);
@@ -627,7 +804,9 @@ impl PacketTranslator {
         }
 
         // 3. USE_ITEM (< 1.21 sequence / yaw / pitch missing)
-        if new_id == mappings::serverbound::play::USE_ITEM.v26_3 && version < JavaMinecraftVersion::V_1_21 {
+        if new_id == mappings::serverbound::play::USE_ITEM.v26_3
+            && version < JavaMinecraftVersion::V_1_21
+        {
             let hand = payload.get_var_int().ok()?;
             let sequence = if version >= JavaMinecraftVersion::V_1_19 {
                 payload.get_var_int().unwrap_or(VarInt(0))
@@ -643,7 +822,9 @@ impl PacketTranslator {
         }
 
         // 4. SIGN_UPDATE (< 26.3 is_front_text was bool before lines or missing in < 1.20)
-        if new_id == mappings::serverbound::play::SIGN_UPDATE.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::SIGN_UPDATE.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let pos_val = payload.get_i64_be().ok()?;
             let is_front = if version >= JavaMinecraftVersion::V_1_20 {
                 payload.get_bool().unwrap_or(true)
@@ -665,7 +846,9 @@ impl PacketTranslator {
         }
 
         // 5. PLAYER_ACTION (< 26.3 status shifted by 1, < 1.19 sequence missing)
-        if new_id == mappings::serverbound::play::PLAYER_ACTION.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::PLAYER_ACTION.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let status = if version >= JavaMinecraftVersion::V_1_9 {
                 payload.get_var_int().ok()?
             } else {
@@ -692,7 +875,9 @@ impl PacketTranslator {
         }
 
         // 6. PLAYER_COMMAND (< 1.21.6 action 0/1 were sneak)
-        if new_id == mappings::serverbound::play::PLAYER_COMMAND.v26_3 && version < JavaMinecraftVersion::V_1_21_6 {
+        if new_id == mappings::serverbound::play::PLAYER_COMMAND.v26_3
+            && version < JavaMinecraftVersion::V_1_21_6
+        {
             let entity_id = if version >= JavaMinecraftVersion::V_1_8 {
                 payload.get_var_int().ok()?
             } else {
@@ -736,7 +921,9 @@ impl PacketTranslator {
         }
 
         // 8. HELLO / LOGIN_START (< 1.20.2 missing UUID)
-        if new_id == mappings::serverbound::login::HELLO.v26_3 && version < JavaMinecraftVersion::V_1_20_2 {
+        if new_id == mappings::serverbound::login::HELLO.v26_3
+            && version < JavaMinecraftVersion::V_1_20_2
+        {
             let name = payload.get_str_borrowed().ok()?;
             let offline_uuid = uuid::Uuid::new_v3(
                 &uuid::Uuid::nil(),
@@ -749,7 +936,9 @@ impl PacketTranslator {
         }
 
         // 9. CHANGE_DIFFICULTY (< 1.21.6 was u8, now VarInt)
-        if new_id == mappings::serverbound::play::CHANGE_DIFFICULTY.v26_3 && version < JavaMinecraftVersion::V_1_21_6 {
+        if new_id == mappings::serverbound::play::CHANGE_DIFFICULTY.v26_3
+            && version < JavaMinecraftVersion::V_1_21_6
+        {
             let diff = payload.get_u8().ok()?;
             let mut out = Vec::new();
             let _ = out.write_var_int(&VarInt(i32::from(diff)));
@@ -757,23 +946,39 @@ impl PacketTranslator {
         }
 
         // 10. PLAYER_INPUT (< 1.21.2 was floats + bools, now i8 bitmask)
-        if new_id == mappings::serverbound::play::PLAYER_INPUT.v26_3 && version < JavaMinecraftVersion::V_1_21_2 {
+        if new_id == mappings::serverbound::play::PLAYER_INPUT.v26_3
+            && version < JavaMinecraftVersion::V_1_21_2
+        {
             let sideways = payload.get_f32_be().unwrap_or(0.0);
             let forward = payload.get_f32_be().unwrap_or(0.0);
             let jumping = payload.get_bool().unwrap_or(false);
             let sneaking = payload.get_bool().unwrap_or(false);
             let mut input: i8 = 0;
-            if forward > 0.0 { input |= 1; } else if forward < 0.0 { input |= 2; }
-            if sideways > 0.0 { input |= 4; } else if sideways < 0.0 { input |= 8; }
-            if jumping { input |= 16; }
-            if sneaking { input |= 32; }
+            if forward > 0.0 {
+                input |= 1;
+            } else if forward < 0.0 {
+                input |= 2;
+            }
+            if sideways > 0.0 {
+                input |= 4;
+            } else if sideways < 0.0 {
+                input |= 8;
+            }
+            if jumping {
+                input |= 16;
+            }
+            if sneaking {
+                input |= 32;
+            }
             let mut out = Vec::new();
             let _ = out.write_i8(input);
             return Some(out);
         }
 
         // 11. MOVE_VEHICLE (< 1.21.4 missing on_ground bool)
-        if new_id == mappings::serverbound::play::MOVE_VEHICLE.v26_3 && version < JavaMinecraftVersion::V_1_21_4 {
+        if new_id == mappings::serverbound::play::MOVE_VEHICLE.v26_3
+            && version < JavaMinecraftVersion::V_1_21_4
+        {
             let x = payload.get_f64_be().ok()?;
             let y = payload.get_f64_be().ok()?;
             let z = payload.get_f64_be().ok()?;
@@ -790,7 +995,9 @@ impl PacketTranslator {
         }
 
         // 12. CONTAINER_BUTTON_CLICK (< 1.21.2 button was i8)
-        if new_id == mappings::serverbound::play::CONTAINER_BUTTON_CLICK.v26_3 && version < JavaMinecraftVersion::V_1_21_2 {
+        if new_id == mappings::serverbound::play::CONTAINER_BUTTON_CLICK.v26_3
+            && version < JavaMinecraftVersion::V_1_21_2
+        {
             let window_id = payload.get_u8().ok()?;
             let button_id = payload.get_i8().ok()?;
             let mut out = Vec::new();
@@ -828,11 +1035,15 @@ impl PacketTranslator {
 
         // Check for CSpawnEntity (ADD_ENTITY) in 26.3
         if packet_id == mappings::clientbound::play::ADD_ENTITY.v26_3 {
-            if let Ok(spawn_entity) = CSpawnEntity::read_packet_data(raw_payload, &JavaMinecraftVersion::V_26_3) {
+            if let Ok(spawn_entity) =
+                CSpawnEntity::read_packet_data(raw_payload, &JavaMinecraftVersion::V_26_3)
+            {
                 let entity_type_id = spawn_entity.r#type.0 as u16;
 
                 // 1. Check if entity is a Painting in <= 1.18.2
-                if version <= JavaMinecraftVersion::V_1_18_2 && entity_type_id == EntityType::PAINTING.id {
+                if version <= JavaMinecraftVersion::V_1_18_2
+                    && entity_type_id == EntityType::PAINTING.id
+                {
                     let painting = CSpawnPainting::new(
                         spawn_entity.entity_id,
                         spawn_entity.entity_uuid,
@@ -877,9 +1088,17 @@ impl PacketTranslator {
 
                 // 3. Normal entity: remap object/entity type and falling block state
                 let remapped_type = if version < JavaMinecraftVersion::V_1_14 {
-                    VarInt(i32::from(remap_object_type_for_version(entity_type_id, version)))
+                    VarInt(i32::from(remap_object_type_for_version(
+                        entity_type_id,
+                        version,
+                    )))
                 } else {
-                    VarInt(i32::from(remap::entity_id_remap::remap_entity_id_for_version(entity_type_id, version)))
+                    VarInt(i32::from(
+                        remap::entity_id_remap::remap_entity_id_for_version(
+                            entity_type_id,
+                            version,
+                        ),
+                    ))
                 };
 
                 let remapped_data = if entity_type_id == EntityType::FALLING_BLOCK.id {
