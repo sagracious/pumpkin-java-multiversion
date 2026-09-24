@@ -350,12 +350,22 @@ mod player_tests {
     const PLAY: u8 = 5;
     const VERSION: JavaMinecraftVersion = JavaMinecraftVersion::V_1_16_2;
 
-    fn merged(key: u64, packet: &'static PacketId, body: &impl ClientPacket) -> Vec<u8> {
+    fn merged_from(
+        key: u64,
+        packet: &'static PacketId,
+        body: &impl ClientPacket,
+        source_version: JavaMinecraftVersion,
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
-        body.write_packet_data(&mut payload, &VERSION).unwrap();
+        body.write_packet_data(&mut payload, &source_version)
+            .unwrap();
         let out = translate_clientbound(key, VERSION, PLAY, packet.v26_3, &payload).unwrap();
         remove_connection(key);
         out.payload
+    }
+
+    fn merged(key: u64, packet: &'static PacketId, body: &impl ClientPacket) -> Vec<u8> {
+        merged_from(key, packet, body, VERSION)
     }
 
     fn merged_into(
@@ -426,8 +436,8 @@ mod player_tests {
     }
 
     /// minecraft-data 1.16.2 `packet_world_border`: an action varint, then the
-    /// fields of the 1.17 packet the action stands for, the lerp time still a
-    /// varlong.
+    /// fields of the 1.17 packet the action stands for. The current source's
+    /// border durations are seconds and become ticks for this client.
     #[test]
     fn the_six_border_packets_become_one() {
         assert_eq!(
@@ -439,14 +449,18 @@ mod player_tests {
             ),
             [0, 0x40, 0x30, 0, 0, 0, 0, 0, 0]
         );
-        assert_eq!(
-            merged(
-                86,
-                &clientbound::play::SET_BORDER_LERP_SIZE,
-                &CSetBorderLerpSize::new(0.0, 0.0, VarLong(5))
-            ),
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5]
+        let lerp = merged_from(
+            86,
+            &clientbound::play::SET_BORDER_LERP_SIZE,
+            &CSetBorderLerpSize::new(0.0, 0.0, VarLong(5)),
+            JavaMinecraftVersion::V_26_3,
         );
+        let mut lerp_read = lerp.as_slice();
+        assert_eq!(VAR_INT.read(&mut lerp_read).unwrap(), VarInt(1));
+        assert_eq!(F64.read(&mut lerp_read).unwrap(), 0.0);
+        assert_eq!(F64.read(&mut lerp_read).unwrap(), 0.0);
+        assert_eq!(VAR_LONG.read(&mut lerp_read).unwrap(), VarLong(250));
+        assert!(lerp_read.is_empty());
         assert_eq!(
             merged(
                 87,
@@ -455,7 +469,7 @@ mod player_tests {
             )[0],
             2
         );
-        let initialize = merged(
+        let initialize = merged_from(
             88,
             &clientbound::play::INITIALIZE_BORDER,
             &CInitializeWorldBorder::new(
@@ -468,9 +482,21 @@ mod player_tests {
                 VarInt(5),
                 VarInt(6),
             ),
+            JavaMinecraftVersion::V_26_3,
         );
-        assert_eq!(initialize[0], 3);
-        assert_eq!(&initialize[initialize.len() - 4..], &[3, 4, 5, 6]);
+        let mut initialize_read = initialize.as_slice();
+        assert_eq!(VAR_INT.read(&mut initialize_read).unwrap(), VarInt(3));
+        for expected in [0.0, 0.0, 1.0, 2.0] {
+            assert_eq!(F64.read(&mut initialize_read).unwrap(), expected);
+        }
+        assert_eq!(VAR_LONG.read(&mut initialize_read).unwrap(), VarLong(150));
+        for expected in [4, 5, 6] {
+            assert_eq!(
+                VAR_INT.read(&mut initialize_read).unwrap(),
+                VarInt(expected)
+            );
+        }
+        assert!(initialize_read.is_empty());
         assert_eq!(
             merged(
                 89,

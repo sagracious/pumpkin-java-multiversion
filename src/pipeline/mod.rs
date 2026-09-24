@@ -195,6 +195,7 @@ pub fn translate_serverbound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::{I64, WireType};
     use crate::packet::mappings::{clientbound, serverbound};
 
     const PLAY: u8 = 5;
@@ -211,7 +212,7 @@ mod tests {
 
     /// A layout handler at the 1.20.5 boundary is owed only where core did not
     /// write for the client itself: configuration `UPDATE_TAGS` has floor
-    /// 1.20.2, `SET_TIME` has none at all.
+    /// 1.20.2, while `SET_TIME` retains its native payload layout.
     #[test]
     fn a_layout_handler_skips_what_core_already_wrote() {
         fn nothing(
@@ -256,9 +257,11 @@ mod tests {
     }
 
     #[test]
-    fn an_untouched_packet_keeps_its_payload_and_gets_the_client_id() {
+    fn set_time_keeps_its_payload_and_gets_the_client_id() {
         let version = JavaMinecraftVersion::V_1_20_2;
-        let payload = [1u8, 2, 3];
+        let mut payload = Vec::new();
+        I64.write(&mut payload, &7i64).unwrap();
+        I64.write(&mut payload, &3i64).unwrap();
         let out = translate_clientbound(
             0,
             version,
