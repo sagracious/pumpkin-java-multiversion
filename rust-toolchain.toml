@@ -1,4 +1,4 @@
 [toolchain]
-# Anything in the latest stable version of Rust is fine to use.
-channel = "stable"
+# Keep the project toolchain aligned with the GitHub Actions build workflow.
+channel = "1.98.0"
 components = ["rust-analyzer", "rust-src"]
