@@ -540,6 +540,32 @@ impl WireType for ClientItemT<'_> {
     }
 }
 
+/// A stack in the server-to-client packet layout, read into the 26.3 form.
+#[derive(Clone, Copy)]
+pub struct ClientboundItemT<'a> {
+    version: V,
+    ids: &'a ComposedMappings,
+}
+
+impl<'a> ClientboundItemT<'a> {
+    #[must_use]
+    pub const fn new(version: V, ids: &'a ComposedMappings) -> Self {
+        Self { version, ids }
+    }
+}
+
+impl WireType for ClientboundItemT<'_> {
+    type Value = Item;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        read_client_item(r, self.version, false, self.ids)
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        ItemT::for_version(self.version).write(w, v)
+    }
+}
+
 /// Reads one stack in `layout`'s wire form and writes it back for `layout`.
 pub fn rewrite_item(
     input: &mut &[u8],
@@ -547,7 +573,7 @@ pub fn rewrite_item(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    let item = ClientItemT::new(layout, ids).read(input)?;
+    let item = ClientboundItemT::new(layout, ids).read(input)?;
     let out = StructuredItemRewriter::to_version(&item, layout, ids);
     ItemT::for_version(layout).write(output, &out)?;
     Ok(())
@@ -567,7 +593,7 @@ pub fn item_pass(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    let item = wrapper.read(&ClientItemT::new(layout, ids))?;
+    let item = wrapper.read(&ClientboundItemT::new(layout, ids))?;
     let out = StructuredItemRewriter::to_version(&item, layout, ids);
     wrapper.write(&ItemT::for_version(layout), &out)
 }

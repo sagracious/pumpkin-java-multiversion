@@ -358,15 +358,9 @@ mod tests {
     fn client_bytes(item: &Item, version: V) -> Vec<u8> {
         let rewritten = StructuredItemRewriter::to_version(item, version, ids(version));
         let mut out = Vec::new();
-        if version >= V::V_1_21_5 {
-            ItemT::length_prefixed(version)
-                .write(&mut out, &rewritten)
-                .unwrap();
-        } else {
-            ItemT::for_version(version)
-                .write(&mut out, &rewritten)
-                .unwrap();
-        }
+        ItemT::for_version(version)
+            .write(&mut out, &rewritten)
+            .unwrap();
         out
     }
 
