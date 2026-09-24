@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(target_item));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(0));
         assert_eq!(
-            STRING.read(&mut cursor).unwrap(),
+            STRING.read(&mut cursor).unwrap().as_ref(),
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(target_item));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(0));
         assert_eq!(
-            STRING.read(&mut cursor).unwrap(),
+            STRING.read(&mut cursor).unwrap().as_ref(),
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(1)); // empty direct set
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(0));
         assert_eq!(
-            STRING.read(&mut cursor).unwrap(),
+            STRING.read(&mut cursor).unwrap().as_ref(),
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
