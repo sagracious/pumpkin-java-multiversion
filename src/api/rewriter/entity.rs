@@ -55,7 +55,8 @@ pub fn replace<P: ClientPacket>(
 
 /// Leaves out the entries `layout` cannot read, and renumbers the rest.
 fn rewrite_entries(
-    entity_type: u16,
+    server_entity_type: u16,
+    client_entity_type: u16,
     entries: &[EntityDataEntry],
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
@@ -64,9 +65,12 @@ fn rewrite_entries(
     entries
         .iter()
         .filter_map(|entry| {
-            let index = tracked_index_for_version(entity_type, entry.index, layout)?;
+            if stand_in_metadata_removed(server_entity_type, entry.index, layout) {
+                return None;
+            }
+            let index = tracked_index_for_version(client_entity_type, entry.index, layout)?;
             let (serializer, value) =
-                rewrite_entry_value(entity_type, entry, layout, ids, game_time)?;
+                rewrite_entry_value(server_entity_type, entry, layout, ids, game_time)?;
             Some(EntityDataEntry {
                 index,
                 serializer,
@@ -74,6 +78,25 @@ fn rewrite_entries(
             })
         })
         .collect()
+}
+
+fn stand_in_metadata_removed(
+    server_entity_type: u16,
+    index: u8,
+    layout: JavaMinecraftVersion,
+) -> bool {
+    if layout > JavaMinecraftVersion::V_1_21_9 {
+        return false;
+    }
+    match server_entity_type {
+        entity if entity == pumpkin_data::entity::EntityType::NAUTILUS.id => {
+            (17..=20).contains(&index)
+        }
+        entity if entity == pumpkin_data::entity::EntityType::ZOMBIE_NAUTILUS.id => {
+            (17..=21).contains(&index)
+        }
+        _ => false,
+    }
 }
 
 fn rewrite_entry_value(
@@ -191,10 +214,16 @@ pub fn set_entity_data(
     let game_time = connection
         .get::<GameTimeStorage>()
         .map_or(0, |storage| storage.game_time);
-    let entries = connection
+    let source_type = connection.entity_tracker.entity_type(entity_id.0);
+    let client_type = connection
         .entity_tracker
-        .entity_type(entity_id.0)
-        .map(|entity_type| rewrite_entries(entity_type, &entries, layout, ids, game_time))
+        .client_entity_type(entity_id.0)
+        .or(source_type);
+    let entries = source_type
+        .zip(client_type)
+        .map(|(server_type, client_type)| {
+            rewrite_entries(server_type, client_type, &entries, layout, ids, game_time)
+        })
         .unwrap_or_default();
     wrapper.write(&list, &entries)
 }
@@ -729,5 +758,128 @@ mod anger_time_tests {
         assert_eq!(VAR_INT.read(&mut read).unwrap().0, 0);
         assert_eq!(read, &[TERMINATOR]);
         remove_connection(key);
+    }
+}
+
+#[cfg(test)]
+mod stand_in_metadata_tests {
+    use super::*;
+    use crate::api::connection::with_connection;
+    use crate::api::entity_data::TERMINATOR;
+    use crate::api::remove_connection;
+    use crate::data::entity_data_types::meta_data_type_id_for_name;
+    use crate::packet::mappings::clientbound;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_protocol::codec::var_long::VarLong;
+    use pumpkin_util::version::JavaMinecraftVersion as V;
+
+    const PLAY: u8 = 5;
+
+    fn raw_entry(index: u8, serializer: &str, value: Vec<u8>) -> EntityDataEntry {
+        EntityDataEntry {
+            index,
+            serializer: meta_data_type_id_for_name(serializer, V::V_26_3).unwrap(),
+            value: MetaValue::Raw(value),
+        }
+    }
+
+    fn translate(
+        key: u64,
+        server_type: u16,
+        client_type: u16,
+        entries: Vec<EntityDataEntry>,
+    ) -> Vec<EntityDataEntry> {
+        const ENTITY_ID: i32 = 77;
+        with_connection(key, V::V_1_21_9, |connection| {
+            connection
+                .entity_tracker
+                .add_mapped(ENTITY_ID, server_type, client_type);
+        });
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(ENTITY_ID)).unwrap();
+        EntityDataListT::for_version(V::V_26_3)
+            .write(&mut payload, &entries)
+            .unwrap();
+        let translated = translate_clientbound(
+            key,
+            V::V_1_21_9,
+            PLAY,
+            clientbound::play::SET_ENTITY_DATA.v26_3,
+            &payload,
+        )
+        .unwrap();
+        let mut read = translated.payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, ENTITY_ID);
+        let entries = EntityDataListT::for_version(V::V_1_21_9)
+            .read(&mut read)
+            .unwrap();
+        assert!(read.is_empty(), "metadata reader consumes the terminator");
+        remove_connection(key);
+        entries
+    }
+
+    #[test]
+    fn nautilus_metadata_uses_squid_base_fields_and_drops_its_own_fields() {
+        let entries = translate(
+            0x2111_2001,
+            EntityType::NAUTILUS.id,
+            EntityType::SQUID.id,
+            vec![
+                raw_entry(9, "float", 20.0f32.to_be_bytes().to_vec()),
+                raw_entry(17, "boolean", vec![1]),
+                raw_entry(18, "byte", vec![1]),
+                raw_entry(19, "optional_living_entity_reference", vec![0]),
+                raw_entry(20, "boolean", vec![1]),
+            ],
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index, 9);
+        assert_eq!(
+            entries[0].value,
+            MetaValue::Raw(20.0f32.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn zombie_nautilus_variant_is_removed_for_the_glow_squid_standin() {
+        let entries = translate(
+            0x2111_2002,
+            EntityType::ZOMBIE_NAUTILUS.id,
+            EntityType::GLOW_SQUID.id,
+            vec![
+                raw_entry(9, "float", 20.0f32.to_be_bytes().to_vec()),
+                raw_entry(17, "boolean", vec![1]),
+                raw_entry(18, "byte", vec![1]),
+                raw_entry(19, "optional_living_entity_reference", vec![0]),
+                raw_entry(20, "boolean", vec![1]),
+                raw_entry(21, "zombie_nautilus_variant", vec![0]),
+            ],
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index, 9);
+    }
+
+    #[test]
+    fn camel_husk_metadata_shifts_onto_the_camel_standin() {
+        let entries = translate(
+            0x2111_2003,
+            EntityType::CAMEL_HUSK.id,
+            EntityType::CAMEL.id,
+            vec![
+                raw_entry(17, "boolean", vec![1]),
+                raw_entry(18, "byte", vec![2]),
+                raw_entry(19, "boolean", vec![1]),
+                raw_entry(20, "long", {
+                    let mut value = Vec::new();
+                    VAR_LONG.write(&mut value, &VarLong(33)).unwrap();
+                    value
+                }),
+            ],
+        );
+        assert_eq!(
+            entries.iter().map(|entry| entry.index).collect::<Vec<_>>(),
+            vec![17, 18, 19]
+        );
     }
 }

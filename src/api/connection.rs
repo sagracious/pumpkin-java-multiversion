@@ -8,9 +8,15 @@ use pumpkin_util::version::JavaMinecraftVersion;
 #[derive(Default)]
 pub struct EntityTracker {
     pub client_entity_id: Option<i32>,
-    entities: HashMap<i32, u16>,
+    entities: HashMap<i32, TrackedEntityTypes>,
     pub min_y: i32,
     pub height: i32,
+}
+
+#[derive(Clone, Copy)]
+struct TrackedEntityTypes {
+    server: u16,
+    client: u16,
 }
 
 /// Server-side game clock shared by protocol rewrites that need tick-relative values.
@@ -20,7 +26,17 @@ pub(crate) struct GameTimeStorage {
 
 impl EntityTracker {
     pub fn add(&mut self, id: i32, entity_type: u16) {
-        self.entities.insert(id, entity_type);
+        self.add_mapped(id, entity_type, entity_type);
+    }
+
+    pub(crate) fn add_mapped(&mut self, id: i32, server_type: u16, client_type: u16) {
+        self.entities.insert(
+            id,
+            TrackedEntityTypes {
+                server: server_type,
+                client: client_type,
+            },
+        );
     }
 
     pub fn remove(&mut self, id: i32) {
@@ -29,7 +45,12 @@ impl EntityTracker {
 
     #[must_use]
     pub fn entity_type(&self, id: i32) -> Option<u16> {
-        self.entities.get(&id).copied()
+        self.entities.get(&id).map(|entity| entity.server)
+    }
+
+    #[must_use]
+    pub(crate) fn client_entity_type(&self, id: i32) -> Option<u16> {
+        self.entities.get(&id).map(|entity| entity.client)
     }
 
     pub fn clear(&mut self) {

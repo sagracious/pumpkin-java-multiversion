@@ -1,6 +1,22 @@
 //! Entity types each version lacks, derived from `assets/tracked_data`.
 
+use pumpkin_data::entity::EntityType;
 use pumpkin_util::version::JavaMinecraftVersion::{self, *};
+
+/// Entity replacements used by ViaBackwards from the 1.21.11 to 1.21.9 step.
+#[must_use]
+pub fn stand_in_type_for_version(entity_type: u16, version: JavaMinecraftVersion) -> u16 {
+    if version > V_1_21_9 {
+        return entity_type;
+    }
+    match entity_type {
+        id if id == EntityType::NAUTILUS.id => EntityType::SQUID.id,
+        id if id == EntityType::ZOMBIE_NAUTILUS.id => EntityType::GLOW_SQUID.id,
+        id if id == EntityType::CAMEL_HUSK.id => EntityType::CAMEL.id,
+        id if id == EntityType::PARCHED.id => EntityType::SKELETON.id,
+        _ => entity_type,
+    }
+}
 
 static ABSENT_V_1_16_2: &[u16] = &[
     1, 2, 4, 7, 8, 13, 15, 16, 17, 18, 19, 20, 24, 28, 31, 33, 35, 56, 59, 61, 62, 63, 70, 73, 76,
@@ -54,7 +70,6 @@ pub fn entity_type_absent_on_version(entity_type: u16, version: JavaMinecraftVer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pumpkin_data::entity::EntityType;
 
     #[test]
     fn a_type_is_absent_until_the_version_that_added_it() {
@@ -70,6 +85,22 @@ mod tests {
         assert!(!entity_type_absent_on_version(EntityType::FROG.id, V_1_19));
         assert!(!entity_type_absent_on_version(EntityType::PIG.id, V_1_16_2));
         assert!(!entity_type_absent_on_version(EntityType::PIG.id, V_26_3));
+    }
+
+    #[test]
+    fn via_1_21_11_entity_types_use_their_documented_stand_ins() {
+        for (source, stand_in) in [
+            (EntityType::NAUTILUS.id, EntityType::SQUID.id),
+            (EntityType::ZOMBIE_NAUTILUS.id, EntityType::GLOW_SQUID.id),
+            (EntityType::CAMEL_HUSK.id, EntityType::CAMEL.id),
+            (EntityType::PARCHED.id, EntityType::SKELETON.id),
+        ] {
+            assert_eq!(stand_in_type_for_version(source, V_1_21_9), stand_in);
+            assert_eq!(stand_in_type_for_version(source, V_1_16_2), stand_in);
+            assert!(entity_type_absent_on_version(source, V_1_21_9));
+            assert_eq!(stand_in_type_for_version(source, V_1_21_11), source);
+            assert_eq!(stand_in_type_for_version(source, V_26_2), source);
+        }
     }
 
     #[test]

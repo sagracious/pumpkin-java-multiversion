@@ -2,6 +2,7 @@
 
 use pumpkin_util::version::JavaMinecraftVersion;
 
+use crate::data::entity_types::stand_in_type_for_version;
 use crate::data::mappings::{IdMapping, MappingData};
 
 fn map(mapping: &IdMapping, id: u16) -> Option<u16> {
@@ -25,5 +26,8 @@ pub fn item_id_for_version(id: u16, version: JavaMinecraftVersion) -> Option<u16
 /// Maps a 26.3 entity type id onto `version`.
 #[must_use]
 pub fn entity_type_id_for_version(id: u16, version: JavaMinecraftVersion) -> Option<u16> {
-    map(&MappingData::get().composed(version).entities, id)
+    map(
+        &MappingData::get().composed(version).entities,
+        stand_in_type_for_version(id, version),
+    )
 }

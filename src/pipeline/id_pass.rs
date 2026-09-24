@@ -11,6 +11,7 @@ use crate::api::protocol::packet_key;
 use crate::api::rewriter::entity as entity_rewriter;
 use crate::api::rewriter::{block, command, particle, screen, sound, stats};
 use crate::api::{ComposedMappings, IdPass, PacketWrapper, TranslateError, UserConnection};
+use crate::data::entity_types::stand_in_type_for_version;
 use crate::packet::mappings::{PacketId, clientbound, serverbound};
 use crate::packet::{block_update, chunk_remap, entity, join, status, update_tags};
 use crate::pipeline::item_pass;
@@ -199,14 +200,14 @@ fn rewrite_spawn(
 ) -> Option<Vec<u8>> {
     let spawn = CSpawnEntity::read_packet_data(payload, &layout).ok()?;
     let entity_type = u16::try_from(spawn.r#type.0).ok()?;
-
+    let client_entity_type = stand_in_type_for_version(entity_type, layout);
     let remapped_type = if layout < JavaMinecraftVersion::V_1_14 {
         VarInt(i32::from(remap_object_type_for_version(
-            entity_type,
+            client_entity_type,
             layout,
         )))
     } else {
-        VarInt(i32::try_from(ids.entities.map(u32::from(entity_type))?).ok()?)
+        VarInt(i32::try_from(ids.entities.map(u32::from(client_entity_type))?).ok()?)
     };
 
     // A state the client lacks falls back to air, as every other state id does.
@@ -238,7 +239,10 @@ fn add_entity(
     let out = {
         let payload = wrapper.remaining();
         if let Some((entity_id, entity_type)) = spawn_prefix(payload) {
-            connection.entity_tracker.add(entity_id, entity_type);
+            let client_type = stand_in_type_for_version(entity_type, layout);
+            connection
+                .entity_tracker
+                .add_mapped(entity_id, entity_type, client_type);
         }
         rewrite_spawn(payload, layout, ids).or_else(|| entity::remap_spawn_entity(payload, layout))
     };
@@ -414,6 +418,36 @@ mod tests {
             u16::try_from(decoded.r#type.0).unwrap(),
             ids.entities.map(u32::from(EntityType::PIG.id)).unwrap() as u16
         );
+    }
+
+    #[test]
+    fn newer_entity_spawns_use_their_via_backwards_stand_ins() {
+        let version = JavaMinecraftVersion::V_1_21_9;
+        let ids = crate::api::MappingData::get().composed(version);
+        for (source, stand_in) in [
+            (EntityType::NAUTILUS.id, EntityType::SQUID.id),
+            (EntityType::ZOMBIE_NAUTILUS.id, EntityType::GLOW_SQUID.id),
+            (EntityType::CAMEL_HUSK.id, EntityType::CAMEL.id),
+            (EntityType::PARCHED.id, EntityType::SKELETON.id),
+        ] {
+            let payload = spawn_payload(source, 0, version);
+            let mut wrapper = PacketWrapper::new(&clientbound::play::ADD_ENTITY, &payload);
+            let mut connection = UserConnection::new(11, version);
+
+            add_entity(&mut wrapper, &mut connection, version, ids).unwrap();
+
+            assert_eq!(connection.entity_tracker.entity_type(11), Some(source));
+            assert_eq!(
+                connection.entity_tracker.client_entity_type(11),
+                Some(stand_in)
+            );
+            let translated = wrapper.finish().unwrap().unwrap();
+            let decoded = CSpawnEntity::read_packet_data(&translated.payload, &version).unwrap();
+            assert_eq!(
+                u16::try_from(decoded.r#type.0).unwrap(),
+                u16::try_from(ids.entities.map(u32::from(stand_in)).unwrap()).unwrap()
+            );
+        }
     }
 
     #[test]

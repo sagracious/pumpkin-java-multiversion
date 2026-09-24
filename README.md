@@ -16,7 +16,7 @@ Plenty of packets only need their id remapped. Block updates and section block u
 
 The rest are rewritten per version. There is no configuration state below 1.20.2, so every registry travels as the NBT dimension codec inside the play login packet, which is what `registry` handles. Tags are four fixed lists up to 1.16.5 and a registry-keyed array from 1.17, in `packet::update_tags`. Chunks carry a varint primary bit mask up to 1.16.5 and a bit set on 1.17, with chunk-wide biomes, full NBT block entities and no section biome palette before 1.18; world height is 0 to 255 up to 1.17.1, so sections outside it are cut rather than shifted. That lives in `packet::chunk_remap` and `packet::chunk_legacy`. Below 1.19 living mobs and paintings arrive in their own spawn packets instead of `ADD_ENTITY`, which is what `packet::legacy` covers.
 
-The 1.21.11 to 1.21.9 step now converts world-border interpolation time from seconds to ticks, drops the new nautilus breathing effect, and tracks game time for wolf/bee anger metadata. Entity stand-ins, new item-component rewrites, and the remaining entity, component, recipe-display, particle, registry, and tag behavior at this boundary are still incomplete.
+The 1.21.11 to 1.21.9 step converts world-border interpolation time from seconds to ticks, drops the new nautilus breathing effect, tracks game time for wolf/bee anger metadata, and maps Nautilus, Zombie Nautilus, Camel Husk, and Parched spawns to older entity types. Nautilus stand-in metadata is filtered and Camel Husk fields map onto Camel metadata. Full stand-in metadata and hover handling, item-component backup/restore, recipe-display rewrites, and other entity, particle, registry, and tag behavior at this boundary are still incomplete.
 
 ## Licensing
 
