@@ -10,15 +10,15 @@ pub mod tag;
 use pumpkin_plugin_api::{
     Context, Plugin, PluginMetadata, Server,
     events::{
-        EventHandler, EventPriority,
-        packet::{PacketReceivedEvent, PacketSentEvent},
+        EventHandler, EventPriority, packet::ProtocolPacketEvent,
         player::player_leave::PlayerLeaveEvent,
     },
-    events_wit::{PacketReceivedEventData, PacketSentEventData, PlayerLeaveEventData},
+    events_wit::{
+        PacketDirection, PacketTranslationOutput, PlayerLeaveEventData, ProtocolPacketEventData,
+    },
     register_plugin,
 };
 
-use crate::api::connection::player_key;
 use crate::api::{bind_player, is_bound, remove_player};
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
@@ -48,9 +48,7 @@ impl Plugin for MultiVersionPlugin {
     fn on_load(&self, context: Context) -> Result<(), String> {
         tracing::info!("Loading Pumpkin Java Multi-Version Plugin...");
 
-        context.register_event_handler(PacketReceivedHandler, EventPriority::Highest, true)?;
-
-        context.register_event_handler(PacketSentHandler, EventPriority::Lowest, true)?;
+        context.register_event_handler(ProtocolPacketHandler, EventPriority::Lowest, true)?;
 
         context.register_event_handler(PlayerLeaveHandler, EventPriority::Lowest, true)?;
 
@@ -66,125 +64,120 @@ impl Plugin for MultiVersionPlugin {
     }
 }
 
-/// Handles incoming packets from clients and translates them if the client is on an older version.
-struct PacketReceivedHandler;
+/// Translates raw Java packets across all protocol states using the connection's stable ID.
+struct ProtocolPacketHandler;
 
-impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
+impl EventHandler<ProtocolPacketEvent> for ProtocolPacketHandler {
     fn handle(
         &self,
         _server: Server,
-        mut event: PacketReceivedEventData,
-    ) -> PacketReceivedEventData {
-        let Some(version) = event_version(event.protocol_version) else {
-            // The current Pumpkin event API also emits packet events for
-            // Bedrock clients, which this Java translator does not handle.
-            return event;
-        };
-        if version == JavaMinecraftVersion::V_26_3 {
-            return event;
-        }
-        // An unsupported client is refused on its first clientbound login
-        // packet (see `refuse_unsupported`); its login start has to reach the
-        // server untouched for that packet to be sent at all.
-        if !is_version_supported(version) {
-            return event;
-        }
-        let state = event.connection_state;
-        // Handshake and status ids never changed.
-        if state < 2 {
-            return event;
-        }
-        let key = player_key(&event.player);
-        match pipeline::translate_serverbound(
-            key,
-            version,
-            state,
-            event.packet_id,
-            &event.raw_payload,
-        ) {
-            Some(translated) => {
-                if !translated.replies.is_empty() {
-                    tracing::warn!(
-                        version = %version,
-                        packet_id = event.packet_id,
-                        count = translated.replies.len(),
-                        "Canceling translated packet because the current Pumpkin WIT bridge cannot send companion replies"
-                    );
-                    event.cancelled = true;
-                    return event;
-                }
-                event.packet_id = translated.packet.v26_3;
-                event.raw_payload = translated.payload;
-            }
-            // No 26.3 equivalent. Forwarding it unchanged makes the server
-            // read the id as whatever packet now occupies that slot and
-            // desync the stream, so drop it instead.
-            None => event.cancelled = true,
-        }
-        event
+        mut event: ProtocolPacketEventData,
+    ) -> ProtocolPacketEventData {
+        translate_protocol_packet(event)
     }
 }
 
-/// Handles outgoing packets to clients and translates them to match the client's expected version.
-struct PacketSentHandler;
-
-impl EventHandler<PacketSentEvent> for PacketSentHandler {
-    fn handle(&self, _server: Server, mut event: PacketSentEventData) -> PacketSentEventData {
-        let Some(version) = event_version(event.protocol_version) else {
-            return event;
-        };
-        if version == JavaMinecraftVersion::V_26_3 {
-            return event;
-        }
-        let state = event.connection_state;
-        if !is_version_supported(version) {
-            return refuse_unsupported(event, version, state);
-        }
-        // Handshake has no clientbound packets and therefore no table.
-        if state == 0 {
-            return event;
-        }
-        #[cfg(feature = "rawdump")]
-        tracing::info!(
-            "RAWDUMP {} {} {} {}",
-            version,
-            state,
-            event.packet_id,
-            hex(&event.raw_payload)
-        );
-        let key = player_key(&event.player);
-        if !is_bound(key) {
-            bind_player(key, version, &event.player);
-        }
-        match pipeline::translate_clientbound(
-            key,
-            version,
-            state,
-            event.packet_id,
-            &event.raw_payload,
-        ) {
-            Some(translated) => {
-                if !translated.extra.is_empty() {
-                    tracing::warn!(
-                        version = %version,
-                        packet_id = event.packet_id,
-                        count = translated.extra.len(),
-                        "Canceling translated packet because the current Pumpkin WIT bridge cannot send companion packets"
-                    );
-                    event.cancelled = true;
-                    return event;
-                }
-                event.packet_id = translated.packet.to_id(version);
-                event.raw_payload = translated.payload;
-            }
-            // No id for this version: the packet does not exist on the client.
-            // Sending it under a 26.3 id would desync the stream, so drop it.
-            None => event.cancelled = true,
-        }
-        event
+fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPacketEventData {
+    let Some(version) = event_version(event.protocol_version) else {
+        return event;
+    };
+    if version == JavaMinecraftVersion::V_26_3 {
+        return event;
     }
-}
+    let state = event.connection_state;
+    let key = event.connection_id;
+    if let Some(player) = event.player.as_ref()
+        && !is_bound(key)
+    {
+        bind_player(key, version, player);
+    }
 
+    match event.direction {
+        PacketDirection::Serverbound => {
+            // Let login start reach Pumpkin so older unsupported clients can receive a refusal.
+            if !is_version_supported(version) {
+                return event;
+            }
+            event.translated = true;
+            if state < 2 {
+                return event;
+            }
+            match pipeline::translate_serverbound(
+                key,
+                version,
+                state,
+                event.packet_id,
+                &event.raw_payload,
+            ) {
+                Some(translated) => {
+                    event.packet_id = translated.packet.v26_3;
+                    event.raw_payload = translated.payload;
+                    event
+                        .clientbound_packets
+                        .extend(translated.replies.into_iter().filter_map(
+                            |(packet, raw_payload)| {
+                                let packet_id = packet.to_id(version);
+                                (packet_id >= 0).then_some(PacketTranslationOutput {
+                                    packet_id,
+                                    raw_payload,
+                                })
+                            },
+                        ));
+                }
+                None => event.cancelled = true,
+            }
+        }
+        PacketDirection::Clientbound => {
+            if !is_version_supported(version) {
+                return refuse_unsupported(event, version, state);
+            }
+            // Handshake has no clientbound packets and therefore no table.
+            if state == 0 {
+                event.translated = true;
+                return event;
+            }
+            #[cfg(feature = "rawdump")]
+            tracing::info!(
+                "RAWDUMP {} {} {} {}",
+                version,
+                state,
+                event.packet_id,
+                hex(&event.raw_payload)
+            );
+            match pipeline::translate_clientbound(
+                key,
+                version,
+                state,
+                event.packet_id,
+                &event.raw_payload,
+            ) {
+                Some(translated) => {
+                    let packet_id = translated.packet.to_id(version);
+                    if packet_id < 0 {
+                        event.cancelled = true;
+                        return event;
+                    }
+                    event.translated = true;
+                    event.packet_id = packet_id;
+                    event.raw_payload = translated.payload;
+                    event
+                        .clientbound_packets
+                        .extend(translated.extra.into_iter().filter_map(
+                            |(packet, raw_payload)| {
+                                let packet_id = packet.to_id(version);
+                                (packet_id >= 0).then_some(PacketTranslationOutput {
+                                    packet_id,
+                                    raw_payload,
+                                })
+                            },
+                        ));
+                }
+                None => event.cancelled = true,
+            }
+        }
+    }
+    event
+}
 fn event_version(protocol_version: i32) -> Option<JavaMinecraftVersion> {
     let protocol_version = u32::try_from(protocol_version).ok()?;
     let version = JavaMinecraftVersion::from_protocol(protocol_version);
@@ -205,18 +198,22 @@ impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
 /// disconnect with a readable reason, and drops everything else meant for it.
 /// The status response is left alone since the client already shows itself as incompatible there.
 fn refuse_unsupported(
-    mut event: PacketSentEventData,
+    mut event: ProtocolPacketEventData,
     version: JavaMinecraftVersion,
     state: u8,
-) -> PacketSentEventData {
+) -> ProtocolPacketEventData {
     // 0 handshake, 1 status, 2 login, 3 transfer, 4 config, 5 play.
     if state != 2 && state != 3 {
         event.cancelled = state != 1;
+        if event.cancelled {
+            event.clientbound_packets.clear();
+        }
         return event;
     }
     let disconnect_id = packet::mappings::clientbound::login::LOGIN_DISCONNECT.to_id(version);
     if disconnect_id == -1 {
         event.cancelled = true;
+        event.clientbound_packets.clear();
         return event;
     }
     let reason = serde_json::json!({
@@ -232,6 +229,8 @@ fn refuse_unsupported(
     }
     event.packet_id = disconnect_id;
     event.raw_payload = payload;
+    event.translated = true;
+    event.clientbound_packets.clear();
     event
 }
 
@@ -292,5 +291,126 @@ mod tests {
             Some(JavaMinecraftVersion::V_26_2)
         );
         assert_eq!(event_version(-1), None, "Bedrock sentinel is ignored");
+    }
+}
+
+#[cfg(test)]
+mod protocol_packet_event_tests {
+    use super::translate_protocol_packet;
+    use crate::api::remove_connection;
+    use crate::packet::mappings::{clientbound, serverbound};
+    use pumpkin_data::registry::RegistryEntryData;
+    use pumpkin_plugin_api::events_wit::{PacketDirection, ProtocolPacketEventData};
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::java::client::config::CRegistryData;
+    use pumpkin_util::version::JavaMinecraftVersion;
+
+    #[test]
+    fn translated_legacy_click_keeps_its_clientbound_confirmation_reply() {
+        let version = JavaMinecraftVersion::V_1_16_2;
+        let connection_id = 0x504a_4d01;
+        let event = ProtocolPacketEventData {
+            connection_id,
+            player: None,
+            direction: PacketDirection::Serverbound,
+            packet_id: serverbound::play::CONTAINER_CLICK.to_id(version),
+            raw_payload: vec![1, 0, 36, 0, 0, 7, 0, 0],
+            protocol_version: version.protocol_version(),
+            connection_state: 5,
+            translated: false,
+            clientbound_packets: Vec::new(),
+            cancelled: false,
+        };
+
+        let translated = translate_protocol_packet(event);
+        assert!(!translated.cancelled, "the recognized click remains usable");
+        assert!(translated.translated);
+        assert_eq!(
+            translated.packet_id,
+            serverbound::play::CONTAINER_CLICK.v26_3
+        );
+        assert_eq!(translated.clientbound_packets.len(), 1);
+        assert_eq!(
+            translated.clientbound_packets[0].packet_id,
+            clientbound::play::WINDOW_CONFIRMATION.to_id(version)
+        );
+        assert_eq!(
+            translated.clientbound_packets[0].raw_payload.as_slice(),
+            &[1, 0, 7, 1]
+        );
+
+        remove_connection(connection_id);
+    }
+
+    fn registry_packet(registry_id: &str, names: &[&str]) -> Vec<u8> {
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| RegistryEntryData {
+                entry_id: format!("minecraft:{name}"),
+                data: Some(Box::new([0x0a, 0x00])),
+            })
+            .collect();
+        let registry_id = registry_id.to_string();
+        let mut payload = Vec::new();
+        CRegistryData::new(&registry_id, &entries)
+            .write_packet_data(&mut payload, &JavaMinecraftVersion::V_1_20_5)
+            .unwrap();
+        payload
+    }
+
+    #[test]
+    fn translated_registry_flush_keeps_its_following_tags_packet() {
+        let version = JavaMinecraftVersion::V_1_20_3;
+        let connection_id = 0x504a_4d02;
+        for payload in [
+            registry_packet("minecraft:dimension_type", &["overworld"]),
+            registry_packet("minecraft:worldgen/biome", &["plains"]),
+        ] {
+            let event = ProtocolPacketEventData {
+                connection_id,
+                player: None,
+                direction: PacketDirection::Clientbound,
+                packet_id: clientbound::config::REGISTRY_DATA.v26_3,
+                raw_payload: payload,
+                protocol_version: version.protocol_version(),
+                connection_state: 4,
+                translated: false,
+                clientbound_packets: Vec::new(),
+                cancelled: false,
+            };
+            let collected = translate_protocol_packet(event);
+            assert!(
+                collected.cancelled,
+                "per-registry packets are held for bundling"
+            );
+        }
+
+        let tags = vec![0];
+        let event = ProtocolPacketEventData {
+            connection_id,
+            player: None,
+            direction: PacketDirection::Clientbound,
+            packet_id: clientbound::config::UPDATE_TAGS.v26_3,
+            raw_payload: tags.clone(),
+            protocol_version: version.protocol_version(),
+            connection_state: 4,
+            translated: false,
+            clientbound_packets: Vec::new(),
+            cancelled: false,
+        };
+        let translated = translate_protocol_packet(event);
+        assert!(!translated.cancelled);
+        assert_eq!(
+            translated.packet_id,
+            clientbound::config::REGISTRY_DATA.to_id(version)
+        );
+        assert_eq!(translated.clientbound_packets.len(), 1);
+        assert_eq!(
+            translated.clientbound_packets[0].packet_id,
+            clientbound::config::UPDATE_TAGS.to_id(version)
+        );
+        assert_eq!(translated.clientbound_packets[0].raw_payload, tags);
+
+        remove_connection(connection_id);
     }
 }

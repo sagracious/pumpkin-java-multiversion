@@ -2,7 +2,7 @@ name: Build Pumpkin Java multiversion WASM
 
 on:
   push:
-    branches: ["master", "fix/**"]
+    branches: ["master", "fix/**", "feat/**"]
     paths:
       - "src/**"
       - "assets/**"
@@ -23,7 +23,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  PUMPKIN_COMMIT: a6d0446b9c065d8573bf3b3ad2d0837209e15d34
+  PUMPKIN_COMMIT: 959b64ff7f8818c2b9cd07baddf9a3f3b4c4352d
   PUMPKIN_TAG: 0.2.0+26.3-26.51
 
 jobs:
