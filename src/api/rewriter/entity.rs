@@ -642,10 +642,11 @@ mod anger_time_tests {
             serializer: meta_data_type_id_for_name("long", V::V_26_3).unwrap(),
             value: MetaValue::Raw(anger),
         };
+        let entries = vec![entry];
         let mut payload = Vec::new();
         VAR_INT.write(&mut payload, &VarInt(entity_id)).unwrap();
         EntityDataListT::for_version(V::V_26_3)
-            .write(&mut payload, &[entry])
+            .write(&mut payload, &entries)
             .unwrap();
         payload
     }
