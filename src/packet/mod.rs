@@ -7,6 +7,7 @@ pub mod entity;
 pub mod join;
 pub mod legacy;
 pub mod mappings;
+pub mod recipe_book;
 pub mod score;
 pub mod status;
 pub mod update_tags;

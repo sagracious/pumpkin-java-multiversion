@@ -338,12 +338,8 @@ mod tests {
     }
 
     #[test]
-    fn the_recipe_book_is_cancelled_below_26_3() {
-        for version in [
-            JavaMinecraftVersion::V_26_2,
-            JavaMinecraftVersion::V_1_21_2,
-            JavaMinecraftVersion::V_1_16_2,
-        ] {
+    fn recipe_display_packet_is_kept_only_where_the_client_has_that_format() {
+        for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_21_2] {
             assert!(
                 translate_clientbound(
                     0,
@@ -352,10 +348,20 @@ mod tests {
                     clientbound::play::RECIPE_BOOK_ADD.v26_3,
                     &[0],
                 )
-                .is_none(),
+                .is_some(),
                 "{version}"
             );
         }
+        assert!(
+            translate_clientbound(
+                0,
+                JavaMinecraftVersion::V_1_16_2,
+                PLAY,
+                clientbound::play::RECIPE_BOOK_ADD.v26_3,
+                &[0],
+            )
+            .is_none()
+        );
     }
 
     #[test]

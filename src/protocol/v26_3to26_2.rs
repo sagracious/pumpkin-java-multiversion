@@ -1,7 +1,10 @@
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
-use crate::packet::mappings::{clientbound, serverbound};
+use crate::packet::{
+    mappings::{clientbound, serverbound},
+    recipe_book,
+};
 
 pub struct Protocol26_3To26_2;
 
@@ -14,8 +17,11 @@ impl Protocol for Protocol26_3To26_2 {
     }
 
     fn register(&self, reg: &mut Registry) {
-        // Recipe displays carry item ids inside a codec nothing rewrites yet.
-        reg.cancel_clientbound(&clientbound::play::RECIPE_BOOK_ADD);
+        // Recipe displays carry nested slot displays, template items and holder sets.
+        reg.clientbound_layout(
+            &clientbound::play::RECIPE_BOOK_ADD,
+            recipe_book::rewrite_recipe_book_add,
+        );
         reg.serverbound(&serverbound::play::SWING, punch);
     }
 }
