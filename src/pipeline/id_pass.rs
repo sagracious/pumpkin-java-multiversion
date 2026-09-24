@@ -442,7 +442,8 @@ mod tests {
                 Some(stand_in)
             );
             let translated = wrapper.finish().unwrap().unwrap();
-            let decoded = CSpawnEntity::read_packet_data(&translated.payload, &version).unwrap();
+            let decoded =
+                CSpawnEntity::read_packet_data(translated.payload.as_slice(), &version).unwrap();
             assert_eq!(
                 u16::try_from(decoded.r#type.0).unwrap(),
                 u16::try_from(ids.entities.map(u32::from(stand_in)).unwrap()).unwrap()
