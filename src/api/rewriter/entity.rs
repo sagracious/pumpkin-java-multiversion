@@ -9,7 +9,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 use crate::api::connection::GameTimeStorage;
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
 use crate::api::rewriter::particle::write_particle;
-use crate::api::types::{VAR_INT, VAR_LONG};
+use crate::api::types::{VAR_INT, VAR_LONG, WireType};
 use crate::api::{PacketWrapper, TranslateError, UserConnection};
 use crate::data::entity_data_types::{
     MetaKind, meta_data_type_id_for_name, meta_data_type_id_for_version, meta_kind,

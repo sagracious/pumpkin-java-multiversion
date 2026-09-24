@@ -1,7 +1,7 @@
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::connection::GameTimeStorage;
-use crate::api::types::{F64, I64, VAR_INT, VAR_LONG};
+use crate::api::types::{F64, I64, VAR_INT, VAR_LONG, WireType};
 use crate::api::{PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
 use crate::packet::mappings::{clientbound, serverbound};
 use pumpkin_protocol::codec::var_long::VarLong;
