@@ -358,9 +358,15 @@ mod tests {
     fn client_bytes(item: &Item, version: V) -> Vec<u8> {
         let rewritten = StructuredItemRewriter::to_version(item, version, ids(version));
         let mut out = Vec::new();
-        ItemT::for_version(version)
-            .write(&mut out, &rewritten)
-            .unwrap();
+        if version >= V::V_1_21_5 {
+            ItemT::length_prefixed(version)
+                .write(&mut out, &rewritten)
+                .unwrap();
+        } else {
+            ItemT::for_version(version)
+                .write(&mut out, &rewritten)
+                .unwrap();
+        }
         out
     }
 
@@ -550,9 +556,8 @@ mod tests {
     fn merchant_offers_rewrite_both_cost_forms() {
         let layout = V::V_1_21_2;
         let sword = native_sword();
-        let client_sword = StructuredItemRewriter::to_version(&sword, layout, ids(layout));
         let mut payload = vec![1, 1];
-        ITEM_COST.write(&mut payload, &client_sword).unwrap();
+        ITEM_COST.write(&mut payload, &sword).unwrap();
         payload.extend(client_bytes(&sword, layout));
         payload.push(0);
         payload.push(1);
