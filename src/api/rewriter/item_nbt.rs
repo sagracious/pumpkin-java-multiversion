@@ -233,7 +233,12 @@ fn sanitize_base(
         if stand_in != entity.id
             && let Some(mapped) = pumpkin_data::entity::EntityType::from_raw(stand_in)
         {
-            *id = mapped.resource_name.into();
+            let resource_name = mapped.resource_name;
+            *id = if resource_name.contains(':') {
+                resource_name.to_owned().into()
+            } else {
+                format!("minecraft:{resource_name}").into()
+            };
         }
     }
     if base
