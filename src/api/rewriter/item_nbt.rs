@@ -12,6 +12,7 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 use crate::api::ComposedMappings;
 use crate::api::rewriter::item_component::legacy_modifier_uuid;
 use crate::api::types::ItemComponent;
+use crate::data::entity_types::stand_in_type_for_version;
 
 /// The enchantments every client from 1.13.2 up has, by registry name
 /// (`md('1.13.2').enchantmentsArray`).
@@ -173,7 +174,7 @@ fn text_from_json(raw: &str) -> TextComponent {
 }
 
 fn text_to_json(text: &TextComponent, version: V, ids: &ComposedMappings) -> String {
-    sanitize_text(text, ids).to_json_for_version(&version)
+    sanitize_text(text, version, ids).to_json_for_version(&version)
 }
 
 /// `display.Lore` holds JSON text components from 1.14; on 1.13 the entries
@@ -197,55 +198,74 @@ fn lore_from_wire(raw: &str, version: V) -> TextComponent {
 /// Drops hover events naming an item or entity the target has no id for; the
 /// client resolves those names while decoding and one unknown name fails the
 /// packet.
-fn sanitize_text(text: &TextComponent, ids: &ComposedMappings) -> TextComponent {
+fn sanitize_text(text: &TextComponent, version: V, ids: &ComposedMappings) -> TextComponent {
     let mut out = text.clone();
-    sanitize_base(&mut out.0, ids);
+    sanitize_base(&mut out.0, version, ids);
     out
 }
 
-fn hover_exists_on(hover: &pumpkin_util::text::hover::HoverEvent, ids: &ComposedMappings) -> bool {
+fn hover_exists_on(
+    hover: &pumpkin_util::text::hover::HoverEvent,
+    version: V,
+    ids: &ComposedMappings,
+) -> bool {
     use pumpkin_util::text::hover::HoverEvent;
     match hover {
         HoverEvent::ShowText { .. } => true,
         HoverEvent::ShowItem { id, .. } => pumpkin_data::item::Item::from_registry_key(id)
             .is_some_and(|item| ids.items.map(u32::from(item.id)).is_some()),
         HoverEvent::ShowEntity { id, .. } => pumpkin_data::entity::EntityType::from_name(id)
-            .is_some_and(|entity| ids.entities.map(u32::from(entity.id)).is_some()),
+            .map(|entity| stand_in_type_for_version(entity.id, version))
+            .is_some_and(|entity| ids.entities.map(u32::from(entity)).is_some()),
     }
 }
 
-fn sanitize_base(base: &mut pumpkin_util::text::TextComponentBase, ids: &ComposedMappings) {
+fn sanitize_base(
+    base: &mut pumpkin_util::text::TextComponentBase,
+    version: V,
+    ids: &ComposedMappings,
+) {
     use pumpkin_util::text::hover::HoverEvent;
+    if let Some(HoverEvent::ShowEntity { id, .. }) = base.style.hover_event.as_mut()
+        && let Some(entity) = pumpkin_data::entity::EntityType::from_name(id)
+    {
+        let stand_in = stand_in_type_for_version(entity.id, version);
+        if stand_in != entity.id
+            && let Some(mapped) = pumpkin_data::entity::EntityType::from_raw(stand_in)
+        {
+            *id = mapped.resource_name.into();
+        }
+    }
     if base
         .style
         .hover_event
         .as_ref()
-        .is_some_and(|hover| !hover_exists_on(hover, ids))
+        .is_some_and(|hover| !hover_exists_on(hover, version, ids))
     {
         base.style.hover_event = None;
     }
     match base.style.hover_event.as_mut() {
         Some(HoverEvent::ShowText { value }) => {
             for child in value {
-                sanitize_base(child, ids);
+                sanitize_base(child, version, ids);
             }
         }
         Some(HoverEvent::ShowEntity {
             name: Some(name), ..
         }) => {
             for child in name {
-                sanitize_base(child, ids);
+                sanitize_base(child, version, ids);
             }
         }
         _ => {}
     }
     if let pumpkin_util::text::TextContent::Translate { with, .. } = base.content.as_mut() {
         for arg in with {
-            sanitize_base(arg, ids);
+            sanitize_base(arg, version, ids);
         }
     }
     for child in &mut base.extra {
-        sanitize_base(child, ids);
+        sanitize_base(child, version, ids);
     }
 }
 
@@ -1145,5 +1165,28 @@ mod tests {
         fractional.extend(7.5f32.to_bits().to_be_bytes());
         fractional.extend([0, 0, 0]);
         assert_eq!(legacy_custom_model_data(&fractional), None);
+    }
+
+    #[test]
+    fn entity_hover_uses_the_via_backwards_standin_name() {
+        use pumpkin_util::text::hover::HoverEvent;
+
+        let mut component = TextComponent::text("entity");
+        component.0.style.hover_event = Some(HoverEvent::show_entity(
+            "00000000-0000-0000-0000-000000000001",
+            "minecraft:nautilus",
+            None,
+        ));
+        let version = V::V_1_21_9;
+        let sanitized = sanitize_text(
+            &component,
+            version,
+            crate::api::MappingData::get().composed(version),
+        );
+
+        let Some(HoverEvent::ShowEntity { id, .. }) = &sanitized.0.style.hover_event else {
+            panic!("the mapped entity hover should remain visible")
+        };
+        assert_eq!(id.as_ref(), "minecraft:squid");
     }
 }
