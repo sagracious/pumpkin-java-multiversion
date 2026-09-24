@@ -13,6 +13,11 @@ pub struct EntityTracker {
     pub height: i32,
 }
 
+/// Server-side game clock shared by protocol rewrites that need tick-relative values.
+pub(crate) struct GameTimeStorage {
+    pub(crate) game_time: i64,
+}
+
 impl EntityTracker {
     pub fn add(&mut self, id: i32, entity_type: u16) {
         self.entities.insert(id, entity_type);

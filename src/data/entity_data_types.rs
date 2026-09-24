@@ -134,6 +134,7 @@ struct Tables {
     /// 26.3 serializer id to the id `version` uses for it.
     ids: Vec<(JavaMinecraftVersion, Vec<Option<i32>>)>,
     kinds: Vec<Option<MetaKind>>,
+    names: HashMap<String, i32>,
 }
 
 fn parse(json: &str) -> HashMap<String, i32> {
@@ -168,7 +169,11 @@ fn tables() -> &'static Tables {
                 (file.version, table)
             })
             .collect();
-        Tables { ids, kinds }
+        Tables {
+            ids,
+            kinds,
+            names: base,
+        }
     })
 }
 
@@ -184,6 +189,13 @@ pub fn meta_data_type_id_for_version(id: i32, version: JavaMinecraftVersion) -> 
         .or_else(|| tables.ids.last())
         .map(|(_, table)| table)?;
     table.get(usize::try_from(id).ok()?).copied().flatten()
+}
+
+/// Maps a 26.3 serializer name onto `version`'s serializer id.
+#[must_use]
+pub fn meta_data_type_id_for_name(name: &str, version: JavaMinecraftVersion) -> Option<i32> {
+    let current_id = *tables().names.get(name)?;
+    meta_data_type_id_for_version(current_id, version)
 }
 
 /// What a 26.3 serializer id writes, `None` for one this never sees on the wire.
@@ -228,6 +240,20 @@ mod tests {
         // The sound variants arrived in 26.1.
         assert_eq!(meta_data_type_id_for_version(22, V_1_21_11), None);
         assert_eq!(meta_data_type_id_for_version(22, V_26_1), Some(22));
+    }
+
+    #[test]
+    fn serializer_names_resolve_to_the_target_version() {
+        let current_int = meta_data_type_id_for_name("int", V_26_3).unwrap();
+        let current_long = meta_data_type_id_for_name("long", V_26_3).unwrap();
+        assert_eq!(
+            meta_data_type_id_for_name("int", V_1_21_9),
+            meta_data_type_id_for_version(current_int, V_1_21_9)
+        );
+        assert_eq!(
+            meta_data_type_id_for_name("long", V_1_21_9),
+            meta_data_type_id_for_version(current_long, V_1_21_9)
+        );
     }
 
     #[test]

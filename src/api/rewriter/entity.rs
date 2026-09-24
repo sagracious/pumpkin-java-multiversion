@@ -6,14 +6,20 @@ use pumpkin_protocol::{
 };
 use pumpkin_util::version::JavaMinecraftVersion;
 
+use crate::api::connection::GameTimeStorage;
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
 use crate::api::rewriter::particle::write_particle;
-use crate::api::types::VAR_INT;
+use crate::api::types::{VAR_INT, VAR_LONG};
 use crate::api::{PacketWrapper, TranslateError, UserConnection};
-use crate::data::entity_data_types::meta_data_type_id_for_version;
+use crate::data::entity_data_types::{
+    MetaKind, meta_data_type_id_for_name, meta_data_type_id_for_version, meta_kind,
+};
 use crate::data::mappings::ComposedMappings;
 use crate::data::tracked_index::tracked_index_for_version;
 use crate::packet::mappings::PacketId;
+
+const WOLF_ANGER_END_TIME_INDEX_26_3: u8 = 22;
+const BEE_ANGER_END_TIME_INDEX_26_3: u8 = 19;
 
 /// The 26.3 entity type the tracker holds for the spawn payload in `wrapper`.
 #[must_use]
@@ -53,17 +59,62 @@ fn rewrite_entries(
     entries: &[EntityDataEntry],
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
+    game_time: i64,
 ) -> Vec<EntityDataEntry> {
     entries
         .iter()
         .filter_map(|entry| {
+            let index = tracked_index_for_version(entity_type, entry.index, layout)?;
+            let (serializer, value) =
+                rewrite_entry_value(entity_type, entry, layout, ids, game_time)?;
             Some(EntityDataEntry {
-                index: tracked_index_for_version(entity_type, entry.index, layout)?,
-                serializer: meta_data_type_id_for_version(entry.serializer, layout)?,
-                value: rewrite_value(&entry.value, layout, ids)?,
+                index,
+                serializer,
+                value,
             })
         })
         .collect()
+}
+
+fn rewrite_entry_value(
+    entity_type: u16,
+    entry: &EntityDataEntry,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+    game_time: i64,
+) -> Option<(i32, MetaValue)> {
+    let anger_time = (entity_type == pumpkin_data::entity::EntityType::WOLF.id
+        && entry.index == WOLF_ANGER_END_TIME_INDEX_26_3)
+        || (entity_type == pumpkin_data::entity::EntityType::BEE.id
+            && entry.index == BEE_ANGER_END_TIME_INDEX_26_3);
+    if layout <= JavaMinecraftVersion::V_1_21_9
+        && anger_time
+        && meta_kind(entry.serializer) == Some(MetaKind::VarLong)
+    {
+        let MetaValue::Raw(raw) = &entry.value else {
+            return None;
+        };
+        let mut read = raw.as_slice();
+        let absolute_time = VAR_LONG.read(&mut read).ok()?.0;
+        if !read.is_empty() {
+            return None;
+        }
+        let remaining = i32::try_from(
+            (i128::from(absolute_time) - i128::from(game_time)).clamp(0, i128::from(i32::MAX)),
+        )
+        .ok()?;
+        let mut value = Vec::new();
+        VAR_INT.write(&mut value, &VarInt(remaining)).ok()?;
+        return Some((
+            meta_data_type_id_for_name("int", layout)?,
+            MetaValue::Raw(value),
+        ));
+    }
+
+    Some((
+        meta_data_type_id_for_version(entry.serializer, layout)?,
+        rewrite_value(&entry.value, layout, ids)?,
+    ))
 }
 
 fn rewrite_value(
@@ -137,10 +188,13 @@ pub fn set_entity_data(
     let entries = wrapper.read(&list)?;
     // Without the entity type there is no index rule to apply, and an entry
     // under the wrong one is fatal to the client.
+    let game_time = connection
+        .get::<GameTimeStorage>()
+        .map_or(0, |storage| storage.game_time);
     let entries = connection
         .entity_tracker
         .entity_type(entity_id.0)
-        .map(|entity_type| rewrite_entries(entity_type, &entries, layout, ids))
+        .map(|entity_type| rewrite_entries(entity_type, &entries, layout, ids, game_time))
         .unwrap_or_default();
     wrapper.write(&list, &entries)
 }
@@ -562,5 +616,117 @@ mod tests {
             TERMINATOR,
         ];
         assert_eq!(translate(&payload, EntityType::PIG.id, layout), want);
+    }
+}
+
+#[cfg(test)]
+mod anger_time_tests {
+    use super::*;
+    use crate::api::connection::with_connection;
+    use crate::api::entity_data::TERMINATOR;
+    use crate::api::remove_connection;
+    use crate::data::entity_data_types::meta_data_type_id_for_name;
+    use crate::packet::mappings::clientbound;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_protocol::codec::var_long::VarLong;
+    use pumpkin_util::version::JavaMinecraftVersion as V;
+
+    const PLAY: u8 = 5;
+
+    fn anger_payload(entity_id: i32, index: u8, absolute_time: i64) -> Vec<u8> {
+        let mut anger = Vec::new();
+        VAR_LONG.write(&mut anger, &VarLong(absolute_time)).unwrap();
+        let entry = EntityDataEntry {
+            index,
+            serializer: meta_data_type_id_for_name("long", V::V_26_3).unwrap(),
+            value: MetaValue::Raw(anger),
+        };
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(entity_id)).unwrap();
+        EntityDataListT::for_version(V::V_26_3)
+            .write(&mut payload, &[entry])
+            .unwrap();
+        payload
+    }
+
+    #[test]
+    fn wolf_and_bee_absolute_anger_times_become_relative_target_ticks() {
+        for (offset, entity_type, source_index, target_index) in [
+            (
+                1u64,
+                EntityType::WOLF.id,
+                WOLF_ANGER_END_TIME_INDEX_26_3,
+                21u8,
+            ),
+            (
+                2u64,
+                EntityType::BEE.id,
+                BEE_ANGER_END_TIME_INDEX_26_3,
+                18u8,
+            ),
+        ] {
+            let key = 0x2111_1000 + offset;
+            let entity_id = i32::try_from(offset).unwrap();
+            with_connection(key, V::V_1_21_9, |connection| {
+                connection.entity_tracker.add(entity_id, entity_type);
+                connection.put(GameTimeStorage { game_time: 1_000 });
+            });
+
+            let payload = anger_payload(entity_id, source_index, 1_050);
+            let translated = translate_clientbound(
+                key,
+                V::V_1_21_9,
+                PLAY,
+                clientbound::play::SET_ENTITY_DATA.v26_3,
+                &payload,
+            )
+            .unwrap();
+
+            let mut read = translated.payload.as_slice();
+            assert_eq!(VAR_INT.read(&mut read).unwrap().0, entity_id);
+            assert_eq!(read[0], target_index);
+            read = &read[1..];
+            assert_eq!(
+                VAR_INT.read(&mut read).unwrap().0,
+                meta_data_type_id_for_name("int", V::V_1_21_9).unwrap()
+            );
+            assert_eq!(VAR_INT.read(&mut read).unwrap().0, 50);
+            assert_eq!(read, &[TERMINATOR]);
+            remove_connection(key);
+        }
+    }
+
+    #[test]
+    fn expired_anger_time_is_clamped_to_zero() {
+        let key = 0x2111_1003;
+        let entity_id = 3;
+        with_connection(key, V::V_1_21_9, |connection| {
+            connection
+                .entity_tracker
+                .add(entity_id, EntityType::WOLF.id);
+            connection.put(GameTimeStorage { game_time: 1_000 });
+        });
+
+        let payload = anger_payload(entity_id, WOLF_ANGER_END_TIME_INDEX_26_3, 900);
+        let translated = translate_clientbound(
+            key,
+            V::V_1_21_9,
+            PLAY,
+            clientbound::play::SET_ENTITY_DATA.v26_3,
+            &payload,
+        )
+        .unwrap();
+        let mut read = translated.payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, entity_id);
+        assert_eq!(read[0], 21);
+        read = &read[1..];
+        assert_eq!(
+            VAR_INT.read(&mut read).unwrap().0,
+            meta_data_type_id_for_name("int", V::V_1_21_9).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 0);
+        assert_eq!(read, &[TERMINATOR]);
+        remove_connection(key);
     }
 }
