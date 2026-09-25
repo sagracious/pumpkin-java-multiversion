@@ -595,7 +595,9 @@ pub fn components_to_nbt(
             _ => None,
         })
         .unwrap_or_default();
-    let mut display = NbtCompound::new();
+    // Unknown display children belong to custom_data too. Keep them as a base
+    // and let the actual item components replace only their legacy keys.
+    let mut display = root.get_compound("display").cloned().unwrap_or_default();
 
     for entry in added {
         let Some(component) = u8::try_from(entry.id)
@@ -772,7 +774,6 @@ static CONSUMED_ROOT_TAGS: &[&str] = &[
     "Trim",
     "Unbreakable",
     "author",
-    "display",
     "map",
     "pages",
     "resolved",
@@ -1002,6 +1003,15 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
             custom.put(name, tag.clone());
         }
     }
+    if let Some(display) = nbt.get_compound("display") {
+        let mut custom_display = display.clone();
+        for name in ["Name", "Lore", "color"] {
+            custom_display.child_tags.remove(name);
+        }
+        if !custom_display.is_empty() {
+            custom.put_compound("display", custom_display);
+        }
+    }
     if !custom.is_empty() {
         let mut data = Vec::new();
         if data
@@ -1099,6 +1109,29 @@ mod tests {
         let back = components_to_nbt(&added, V::V_1_16_2, ids()).unwrap();
         assert_eq!(back.get_int("HideFlags"), Some(63));
         assert_eq!(back.get_int("Damage"), Some(3));
+    }
+
+    #[test]
+    fn unknown_display_children_survive_legacy_component_round_trips() {
+        let version = V::V_1_16_2;
+        let mut display = NbtCompound::new();
+        display.put_string("Name", r#"{"text":"Display name"}"#.to_owned());
+        display.put_list(
+            "Lore",
+            vec![NbtTag::String(r#"{"text":"Lore line"}"#.into())],
+        );
+        display.put_int("color", 0x12_3456);
+        display.put_int("plugin_marker", 99);
+        let mut nbt = NbtCompound::new();
+        nbt.put_compound("display", display);
+
+        let components = nbt_to_components(&nbt, version);
+        let back = components_to_nbt(&components, version, ids()).unwrap();
+        let display = back.get_compound("display").unwrap();
+        assert_eq!(display.get_int("plugin_marker"), Some(99));
+        assert!(display.get_string("Name").is_some());
+        assert!(display.get_list("Lore").is_some());
+        assert_eq!(display.get_int("color"), Some(0x12_3456));
     }
 
     #[test]
