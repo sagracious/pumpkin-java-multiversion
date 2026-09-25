@@ -11,6 +11,10 @@ const FIRST_PARSER_ID: JavaMinecraftVersion = JavaMinecraftVersion::V_1_19;
 const FIRST_TIME_MINIMUM: JavaMinecraftVersion = JavaMinecraftVersion::V_1_19_4;
 
 const STRING_PARSER: i32 = 5;
+/// Parser ids resolved from ViaVersion's checked-in 26.3 identifier data.
+/// They are context_float_provider (55), context_int_provider (56),
+/// slot_source (57), feature (59) and swing_animation (60).
+const QUOTABLE_26_3_ARGUMENTS: &[i32] = &[55, 56, 57, 59, 60];
 const NODE_TYPE: u8 = 3;
 const HAS_REDIRECT: u8 = 8;
 const HAS_SUGGESTION_TYPE: u8 = 16;
@@ -103,22 +107,30 @@ pub fn commands(
                 .ok()
                 .and_then(|id| ids.argumenttypes.map(id))
                 .and_then(|id| i32::try_from(id).ok());
-            // A parser the client does not know becomes a single word string,
-            // which is what its properties are replaced with.
-            let keep =
-                mapped.is_some_and(|mapped| mapped != string_parser) || parser == STRING_PARSER;
-            let quotable_fallback = !keep && parser >= 62;
-            wrapper.write(&VAR_INT, &VarInt(mapped.unwrap_or(string_parser)))?;
+            // The 26.3->26.2 Via handler forces these named parser types to
+            // brigadier:string with QUOTABLE_PHRASE, even where the numeric
+            // mapping already aliases them to string.
+            let force_quotable_fallback = QUOTABLE_26_3_ARGUMENTS.contains(&parser);
+            let keep = !force_quotable_fallback
+                && (mapped.is_some_and(|mapped| mapped != string_parser)
+                    || parser == STRING_PARSER);
+            let fallback = if force_quotable_fallback {
+                string_parser
+            } else {
+                mapped.unwrap_or(string_parser)
+            };
+            wrapper.write(&VAR_INT, &VarInt(fallback))?;
             properties(wrapper, parser, layout, keep)?;
             if !keep {
                 // ViaBackwards' 26.3 rewriter maps the newly added feature,
                 // slot_source, swing_animation and context provider parsers to
                 // brigadier:string with QUOTABLE_PHRASE. PJM has numeric ids
-                // rather than Via's parser-name table, so an unmapped 26.3
-                // parser uses that same safe quoting mode. The last known
-                // shared parser id is `uuid` (61); the five new 26.3 parsers
-                // are appended after it in the server's argument registry.
-                wrapper.write(&VAR_INT, &VarInt(if quotable_fallback { 1 } else { 0 }))?;
+                // rather than Via's parser-name table, so this checked-in id
+                // range uses that same safe quoting mode.
+                wrapper.write(
+                    &VAR_INT,
+                    &VarInt(if force_quotable_fallback { 1 } else { 0 }),
+                )?;
             }
         }
         if flags & HAS_SUGGESTION_TYPE != 0 {
@@ -203,20 +215,18 @@ mod tests {
     }
 
     #[test]
-    fn a_263_only_parser_falls_back_to_a_quotable_string_for_262_clients() {
+    fn the_five_263_only_parsers_fall_back_to_quotable_strings() {
         let mapping = MappingData::get();
-        let latest_target = mapping.composed(JavaMinecraftVersion::V_26_2);
-        let missing = (62u32..4096)
-            .find(|id| latest_target.argumenttypes.map(*id).is_none())
-            .expect("a 26.3-only argument type exists");
         for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_16_2] {
             let ids = mapping.composed(version);
             let string = i32::try_from(ids.argumenttypes.map(5).unwrap()).unwrap();
-            assert_eq!(
-                run(&payload(i32::try_from(missing).unwrap(), &[]), version),
-                payload(string, &[1]),
-                "ViaBackwards uses the quotable-string parser for new command arguments on {version}"
-            );
+            for parser in QUOTABLE_26_3_ARGUMENTS {
+                assert_eq!(
+                    run(&payload(*parser, &[]), version),
+                    payload(string, &[1]),
+                    "ViaBackwards maps argument parser {parser} to quotable string on {version}"
+                );
+            }
         }
     }
 
