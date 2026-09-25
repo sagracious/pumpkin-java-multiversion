@@ -734,6 +734,30 @@ mod tests {
     }
 
     #[test]
+    fn canceled_login_query_queues_the_followup_toward_the_server() {
+        let mut input = Vec::new();
+        VAR_INT.write(&mut input, &VarInt(37)).unwrap();
+        STRING.write(&mut input, &"minecraft:brand".into()).unwrap();
+        input.extend_from_slice(b"ignored query data");
+        let mut wrapper = PacketWrapper::new(&clientbound::login::CUSTOM_QUERY, &input);
+        login_custom_query(
+            &mut wrapper,
+            &mut UserConnection::new(0, V1_12_2),
+            &context(V1_13),
+        )
+        .unwrap();
+
+        let output = wrapper.finish_with_outputs().unwrap();
+        assert!(output.cancelled);
+        assert_eq!(output.serverbound.len(), 1);
+        assert_eq!(
+            output.serverbound[0].0.to_id(V1_12_2),
+            serverbound::login::CUSTOM_QUERY_ANSWER.to_id(V1_12_2)
+        );
+        assert_eq!(output.serverbound[0].1, [37, 0]);
+    }
+
+    #[test]
     fn stop_sound_becomes_the_legacy_custom_payload() {
         // Both flags set, category 1 (music), sound name.
         let mut input = vec![3, 1];
