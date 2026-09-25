@@ -1,25 +1,31 @@
-//! Rewrites the modern recipe-book display payload emitted by Pumpkin.
+//! Rewrites Pumpkin's 26.3 recipe-book payload for an older client.
 //!
-//! Pumpkin's 26.3 recipe writer emits the stable empty, any-fuel, item,
-//! item-stack and composite slot displays. Unknown display codecs fail closed:
-//! their payload shape cannot safely be skipped without a matching Via handler.
+//! Slot-display types and nested data are mapped to the target registry and
+//! payload layout. Unknown display codecs fail closed: their payload shape
+//! cannot safely be skipped without a matching Via handler.
 
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::item::StructuredItemRewriter;
-use crate::api::types::{BOOL, F32T, ItemT, STRING, TEMPLATE_ITEM, U8, VAR_INT};
+use crate::api::types::{BOOL, F32T, ItemT, NbtT, STRING, TEMPLATE_ITEM, U8, VAR_INT};
 use crate::api::{Ctx, MappingData, PacketWrapper, TranslateError, UserConnection};
 use crate::data::mappings::{ComposedMappings, IdMapping};
 
 const MAX_RECIPE_ENTRIES: i32 = 16_384;
 const MAX_RECIPE_LIST: i32 = 4_096;
 
-// These are the 26.2 slot-display ids used by Pumpkin's recipe packet writer.
+// Source 26.3 slot-display IDs (the first 11 IDs match 26.2).
 const SLOT_DISPLAY_EMPTY: i32 = 0;
 const SLOT_DISPLAY_ANY_FUEL: i32 = 1;
+const SLOT_DISPLAY_WITH_ANY_POTION: i32 = 2;
+const SLOT_DISPLAY_ONLY_WITH_COMPONENT: i32 = 3;
 const SLOT_DISPLAY_ITEM: i32 = 4;
 const SLOT_DISPLAY_ITEM_STACK: i32 = 5;
+const SLOT_DISPLAY_TAG: i32 = 6;
+const SLOT_DISPLAY_DYED: i32 = 7;
+const SLOT_DISPLAY_SMITHING_TRIM: i32 = 8;
+const SLOT_DISPLAY_WITH_REMAINDER: i32 = 9;
 const SLOT_DISPLAY_COMPOSITE: i32 = 10;
 
 /// Rewrites a 26.3 recipe-book payload directly to the connected client's
@@ -42,7 +48,7 @@ pub fn rewrite_recipe_book_add(
     let entry_count = read_count(wrapper, MAX_RECIPE_ENTRIES, "recipe entry count", true)?;
     for _ in 0..entry_count {
         wrapper.passthrough(&VAR_INT)?; // Display id (referenced by Place Recipe)
-        recipe_display(wrapper, target, mappings)?;
+        recipe_display(wrapper, connection, target, mappings)?;
         wrapper.passthrough(&VAR_INT)?; // Optional group id
         wrapper.passthrough(&VAR_INT)?; // Recipe-book category
         crafting_requirements(wrapper, mappings)?;
@@ -78,6 +84,7 @@ fn write_var_int(wrapper: &mut PacketWrapper, value: i32) -> Result<(), Translat
 
 fn recipe_display(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     target: V,
     mappings: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -85,22 +92,22 @@ fn recipe_display(
     match kind {
         // Shapeless: ingredients, result and crafting station.
         0 => {
-            slot_display_list(wrapper, target, mappings)?;
-            slot_display(wrapper, target, mappings, true)?;
-            slot_display(wrapper, target, mappings, true)?;
+            slot_display_list(wrapper, connection, target, mappings)?;
+            slot_display(wrapper, connection, target, mappings, true)?;
+            slot_display(wrapper, connection, target, mappings, true)?;
         }
         // Shaped: width, height, ingredients, result and crafting station.
         1 => {
             wrapper.passthrough(&VAR_INT)?;
             wrapper.passthrough(&VAR_INT)?;
-            slot_display_list(wrapper, target, mappings)?;
-            slot_display(wrapper, target, mappings, true)?;
-            slot_display(wrapper, target, mappings, true)?;
+            slot_display_list(wrapper, connection, target, mappings)?;
+            slot_display(wrapper, connection, target, mappings, true)?;
+            slot_display(wrapper, connection, target, mappings, true)?;
         }
         // Furnace: ingredient, fuel, result, station, duration and experience.
         2 => {
             for _ in 0..4 {
-                slot_display(wrapper, target, mappings, true)?;
+                slot_display(wrapper, connection, target, mappings, true)?;
             }
             wrapper.passthrough(&VAR_INT)?;
             wrapper.passthrough(&F32T)?;
@@ -108,13 +115,13 @@ fn recipe_display(
         // Stonecutter: input, result and station.
         3 => {
             for _ in 0..3 {
-                slot_display(wrapper, target, mappings, true)?;
+                slot_display(wrapper, connection, target, mappings, true)?;
             }
         }
         // Smithing: template, base, addition, result and station.
         4 => {
             for _ in 0..5 {
-                slot_display(wrapper, target, mappings, true)?;
+                slot_display(wrapper, connection, target, mappings, true)?;
             }
         }
         _ => return Err(TranslateError::Unsupported("recipe display type")),
@@ -124,12 +131,13 @@ fn recipe_display(
 
 fn slot_display_list(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     target: V,
     mappings: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     let count = read_count(wrapper, MAX_RECIPE_LIST, "recipe slot display count", true)?;
     for _ in 0..count {
-        slot_display(wrapper, target, mappings, true)?;
+        slot_display(wrapper, connection, target, mappings, true)?;
     }
     Ok(())
 }
@@ -138,6 +146,7 @@ fn slot_display_list(
 /// when the target version has no mapping for that display type.
 fn slot_display(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     target: V,
     mappings: &ComposedMappings,
     emit: bool,
@@ -168,7 +177,7 @@ fn slot_display(
         }
         SLOT_DISPLAY_ITEM_STACK => {
             let native = wrapper.read(&TEMPLATE_ITEM)?;
-            let mapped = StructuredItemRewriter::to_version(&native, target, mappings);
+            let mut mapped = StructuredItemRewriter::to_version(&native, target, mappings);
             let display_type = if mapped_type.is_some_and(|id| id != 0) && !mapped.is_empty() {
                 mapped_type.unwrap()
             } else {
@@ -177,6 +186,13 @@ fn slot_display(
             if emit {
                 write_var_int(wrapper, display_type)?;
                 if display_type != 0 {
+                    crate::api::rewriter::item_backup::backup_clientbound_item(
+                        connection,
+                        &native,
+                        &mut mapped,
+                        target,
+                        mappings,
+                    );
                     if target >= V::V_26_1 {
                         wrapper.write(&TEMPLATE_ITEM, &mapped)?;
                     } else {
@@ -198,7 +214,99 @@ fn slot_display(
                 emit_children,
             )?;
             for _ in 0..count {
-                slot_display(wrapper, target, mappings, emit_children)?;
+                slot_display(wrapper, connection, target, mappings, emit_children)?;
+            }
+        }
+        SLOT_DISPLAY_WITH_ANY_POTION => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            slot_display(
+                wrapper,
+                connection,
+                target,
+                mappings,
+                emit && display_type != 0,
+            )?;
+        }
+        SLOT_DISPLAY_ONLY_WITH_COMPONENT => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            let emit_children = emit && display_type != 0;
+            slot_display(wrapper, connection, target, mappings, emit_children)?;
+            let source_component = wrapper.read(&VAR_INT)?.0;
+            if emit_children {
+                let component =
+                    mapped_id(&mappings.data_component_type, source_component).unwrap_or(0);
+                write_var_int(wrapper, component)?;
+            }
+        }
+        SLOT_DISPLAY_TAG => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            let emit_tag = emit && display_type != 0;
+            // In the 26.3 layout this is a HolderSet. ViaBackwards converts
+            // named sets to the old string form and uses "planks" when an
+            // explicit ID set cannot be represented (Protocol26_3To26_2).
+            let selector = wrapper.read(&VAR_INT)?.0;
+            let tag = if selector == 0 {
+                Some(wrapper.read(&STRING)?)
+            } else {
+                if selector < 0 || selector - 1 > MAX_RECIPE_LIST {
+                    return Err(TranslateError::Unsupported("recipe slot display tag"));
+                }
+                for _ in 0..(selector - 1) {
+                    wrapper.read(&VAR_INT)?;
+                }
+                Some("planks".into())
+            };
+            if emit_tag {
+                wrapper.write(&STRING, &tag.expect("tag display has a payload"))?;
+            }
+        }
+        SLOT_DISPLAY_DYED => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            let emit_children = emit && display_type != 0;
+            for _ in 0..2 {
+                slot_display(wrapper, connection, target, mappings, emit_children)?;
+            }
+        }
+        SLOT_DISPLAY_SMITHING_TRIM => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            let emit_children = emit && display_type != 0;
+            for _ in 0..2 {
+                slot_display(wrapper, connection, target, mappings, emit_children)?;
+            }
+            // ArmorTrimPattern.TYPE1_21_5 is asset name, text NBT, and decal.
+            // ViaBackwards passes this payload through unchanged.
+            let asset_name = wrapper.read(&STRING)?;
+            let description = wrapper.read(&NbtT::for_version(V::V_26_3))?;
+            let decal = wrapper.read(&BOOL)?;
+            if emit_children {
+                wrapper.write(&STRING, &asset_name)?;
+                wrapper.write(&NbtT::for_version(V::V_26_3), &description)?;
+                wrapper.write(&BOOL, &decal)?;
+            }
+        }
+        SLOT_DISPLAY_WITH_REMAINDER => {
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
+            if emit {
+                write_var_int(wrapper, display_type)?;
+            }
+            let emit_children = emit && display_type != 0;
+            for _ in 0..2 {
+                slot_display(wrapper, connection, target, mappings, emit_children)?;
             }
         }
         _ => return Err(TranslateError::Unsupported("recipe slot display codec")),
@@ -376,11 +484,9 @@ mod tests {
         };
         assert_eq!(id, target_item);
         assert_eq!(count, 3);
-        assert_eq!(added.len(), 1);
-        assert_eq!(
-            added[0].id,
-            i32::from(DataComponent::AttackAnimation.to_id())
-        );
+        assert!(added.iter().any(|component| {
+            component.id == i32::from(DataComponent::AttackAnimation.to_id())
+        }));
 
         assert_eq!(
             VAR_INT.read(&mut cursor).unwrap().0,
@@ -549,5 +655,257 @@ mod tests {
             translate_clientbound(key, TARGET, PLAY, RECIPE_BOOK_ADD.v26_3, &payload,).is_none()
         );
         remove_connection(key);
+    }
+
+    fn translate_slot_display(payload: &[u8], target: V, key: u64) -> Vec<u8> {
+        let mappings = MappingData::get().composed(target);
+        let mut wrapper = PacketWrapper::new(&RECIPE_BOOK_ADD, payload);
+        let mut connection = UserConnection::new(key, target);
+        slot_display(&mut wrapper, &mut connection, target, mappings, true).unwrap();
+        let translated = wrapper.finish().unwrap().unwrap().payload;
+        remove_connection(key);
+        translated
+    }
+
+    fn push_var_int(payload: &mut Vec<u8>, value: i32) {
+        VAR_INT.write(payload, &VarInt(value)).unwrap();
+    }
+
+    fn push_item_display(payload: &mut Vec<u8>, item_id: i32) {
+        push_var_int(payload, SLOT_DISPLAY_ITEM);
+        push_var_int(payload, item_id);
+    }
+
+    fn push_empty_display(payload: &mut Vec<u8>) {
+        push_var_int(payload, SLOT_DISPLAY_EMPTY);
+    }
+
+    #[test]
+    fn with_any_potion_rewrites_its_nested_display() {
+        let key = 0x2623_0010;
+        let mappings = MappingData::get().composed(TARGET);
+        let (source_item, target_item) = mapped_source_item(mappings);
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_WITH_ANY_POTION);
+        push_item_display(&mut payload, source_item);
+
+        let translated = translate_slot_display(&payload, TARGET, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_WITH_ANY_POTION).unwrap()
+        );
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn only_with_component_rewrites_nested_item_and_component_ids() {
+        let key = 0x2623_0011;
+        let mappings = MappingData::get().composed(TARGET);
+        let (source_item, target_item) = mapped_source_item(mappings);
+        let source_component = i32::from(DataComponent::Damage.to_id());
+        let target_component = mapped_id(&mappings.data_component_type, source_component).unwrap();
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_ONLY_WITH_COMPONENT);
+        push_item_display(&mut payload, source_item);
+        push_var_int(&mut payload, source_component);
+
+        let translated = translate_slot_display(&payload, TARGET, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ONLY_WITH_COMPONENT).unwrap()
+        );
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_component);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn only_with_component_uses_empty_component_id_when_target_lacks_it() {
+        let key = 0x2623_0018;
+        let mappings = MappingData::get().composed(TARGET);
+        let missing_component = i32::from(DataComponent::CushionColor.to_id());
+        assert!(mapped_id(&mappings.data_component_type, missing_component).is_none());
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_ONLY_WITH_COMPONENT);
+        push_empty_display(&mut payload);
+        push_var_int(&mut payload, missing_component);
+
+        let translated = translate_slot_display(&payload, TARGET, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ONLY_WITH_COMPONENT).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, SLOT_DISPLAY_EMPTY);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 0);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn tag_holder_sets_downgrade_to_string_and_direct_ids_use_the_via_placeholder() {
+        let target = V::V_1_21_11;
+        let key = 0x2623_0012;
+        let mappings = MappingData::get().composed(target);
+        let mut named_payload = Vec::new();
+        push_var_int(&mut named_payload, SLOT_DISPLAY_TAG);
+        push_var_int(&mut named_payload, 0); // HolderSet tag selector
+        STRING
+            .write(
+                &mut named_payload,
+                &"minecraft:stone_crafting_materials".into(),
+            )
+            .unwrap();
+
+        let translated = translate_slot_display(&named_payload, target, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_TAG).unwrap()
+        );
+        assert_eq!(
+            STRING.read(&mut cursor).unwrap().as_ref(),
+            "minecraft:stone_crafting_materials"
+        );
+        assert!(cursor.is_empty());
+
+        let key = 0x2623_0013;
+        let mut ids_payload = Vec::new();
+        push_var_int(&mut ids_payload, SLOT_DISPLAY_TAG);
+        push_var_int(&mut ids_payload, 2); // one explicit item id plus selector
+        push_var_int(&mut ids_payload, 1_234);
+        let translated = translate_slot_display(&ids_payload, target, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_TAG).unwrap()
+        );
+        assert_eq!(STRING.read(&mut cursor).unwrap().as_ref(), "planks");
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn dyed_rewrites_both_nested_displays() {
+        let key = 0x2623_0014;
+        let mappings = MappingData::get().composed(TARGET);
+        let (source_item, target_item) = mapped_source_item(mappings);
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_DYED);
+        push_item_display(&mut payload, source_item);
+        push_var_int(&mut payload, SLOT_DISPLAY_ANY_FUEL);
+
+        let translated = translate_slot_display(&payload, TARGET, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_DYED).unwrap()
+        );
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ANY_FUEL).unwrap()
+        );
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn smithing_trim_rewrites_base_and_material_and_preserves_pattern_payload() {
+        let key = 0x2623_0015;
+        let target = V::V_1_21_11;
+        let mappings = MappingData::get().composed(target);
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_SMITHING_TRIM);
+        push_empty_display(&mut payload);
+        push_var_int(&mut payload, SLOT_DISPLAY_ANY_FUEL);
+        STRING
+            .write(&mut payload, &"minecraft:spire".into())
+            .unwrap();
+        let description = Some(pumpkin_nbt::tag::NbtTag::String("trim description".into()));
+        NbtT::for_version(V::V_26_3)
+            .write(&mut payload, &description)
+            .unwrap();
+        BOOL.write(&mut payload, &true).unwrap();
+
+        let translated = translate_slot_display(&payload, target, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_SMITHING_TRIM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, SLOT_DISPLAY_EMPTY);
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ANY_FUEL).unwrap()
+        );
+        assert_eq!(
+            STRING.read(&mut cursor).unwrap().as_ref(),
+            "minecraft:spire"
+        );
+        assert_eq!(
+            NbtT::for_version(V::V_26_3).read(&mut cursor).unwrap(),
+            description
+        );
+        assert!(BOOL.read(&mut cursor).unwrap());
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn with_remainder_rewrites_input_and_remainder_displays() {
+        let key = 0x2623_0016;
+        let target = V::V_1_21_11;
+        let mappings = MappingData::get().composed(target);
+        let (source_item, target_item) = mapped_source_item(mappings);
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_WITH_REMAINDER);
+        push_item_display(&mut payload, source_item);
+        push_empty_display(&mut payload);
+
+        let translated = translate_slot_display(&payload, target, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_WITH_REMAINDER).unwrap()
+        );
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, SLOT_DISPLAY_EMPTY);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn unsupported_nested_slot_display_is_dropped_without_leaving_payload_bytes() {
+        let key = 0x2623_0017;
+        let target = V::V_1_21_11;
+        let mappings = MappingData::get().composed(target);
+        let source_item = i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id);
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, SLOT_DISPLAY_DYED);
+        push_item_display(&mut payload, source_item);
+        push_item_display(&mut payload, source_item);
+
+        let translated = translate_slot_display(&payload, target, key);
+        let mut cursor = translated.as_slice();
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_EMPTY).unwrap()
+        );
+        assert!(cursor.is_empty());
     }
 }
