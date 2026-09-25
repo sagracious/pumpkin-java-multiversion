@@ -7,7 +7,9 @@ use pumpkin_util::version::JavaMinecraftVersion;
 use crate::api::rewriter::item::rewrite_item_value;
 use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle};
 use crate::api::types::{NbtT, STRING, VAR_INT, VAR_LONG, WireType};
-use crate::data::entity_data_types::{MetaKind, meta_kind};
+use crate::data::entity_data_types::{
+    MetaKind, canonical_meta_data_type_id_for_version, meta_kind,
+};
 use crate::data::mappings::{ComposedMappings, MappingData};
 
 /// Ends the list; what vanilla writes after the last entry.
@@ -91,7 +93,8 @@ fn read_entry(
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
 ) -> Option<EntityDataEntry> {
-    let serializer = r.get_var_int().ok()?.0;
+    let wire_serializer = r.get_var_int().ok()?.0;
+    let serializer = canonical_meta_data_type_id_for_version(wire_serializer, layout)?;
     let value = read_value(meta_kind(serializer)?, r, layout, ids)?;
     Some(EntityDataEntry {
         index,
@@ -213,7 +216,8 @@ mod tests {
     use pumpkin_data::particle::Particle as ParticleKind;
     use pumpkin_util::version::JavaMinecraftVersion as V;
 
-    /// A pig's shared flags, health and absent custom name, in 26.3 numbering.
+    /// A pig's shared flags, health and absent custom name, in canonical
+    /// 26.3 serializer numbering.
     fn pig_entries() -> Vec<u8> {
         let mut out = vec![0, 0, 0x08];
         out.extend([9, 3]);
@@ -224,26 +228,53 @@ mod tests {
     }
 
     #[test]
-    fn a_list_round_trips_in_every_layout() {
-        for layout in [
-            V::V_1_16_2,
-            V::V_1_18_2,
-            V::V_1_20_3,
-            V::V_1_21_4,
-            V::V_26_2,
-        ] {
-            let payload = pig_entries();
-            let list = EntityDataListT::for_version(layout);
+    fn a_canonical_list_round_trips_in_the_26_3_layout() {
+        let payload = pig_entries();
+        let list = EntityDataListT::for_version(V::V_26_3);
+        let mut read: &[u8] = &payload;
+        let entries = list.read(&mut read).unwrap();
+        assert!(read.is_empty());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].index, 9);
+        assert_eq!(entries[1].serializer, 3);
+        let mut out = Vec::new();
+        list.write(&mut out, &entries).unwrap();
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn a_legacy_rotation_serializer_is_not_misread_as_the_canonical_boolean() {
+        for layout in [V::V_1_15_2, V::V_1_16, V::V_1_16_1, V::V_1_16_2] {
+            let mut payload = vec![9, 8]; // index 9, wire serializer 8 (rotation)
+            payload.extend([0x3f, 0x80, 0, 0]);
+            payload.extend([0u8; 8]);
+            payload.push(TERMINATOR);
+
             let mut read: &[u8] = &payload;
-            let entries = list.read(&mut read).unwrap();
+            let entries = EntityDataListT::for_version(layout)
+                .read(&mut read)
+                .unwrap();
             assert!(read.is_empty(), "{layout}");
-            assert_eq!(entries.len(), 3, "{layout}");
-            assert_eq!(entries[1].index, 9);
-            assert_eq!(entries[1].serializer, 3);
-            let mut out = Vec::new();
-            list.write(&mut out, &entries).unwrap();
-            assert_eq!(out, payload, "{layout}");
+            assert_eq!(entries.len(), 1, "{layout}");
+            assert_eq!(entries[0].serializer, 9, "canonical rotations id, {layout}");
+            assert_eq!(entries[0].value, MetaValue::Raw(payload[2..14].to_vec()));
         }
+    }
+
+    #[test]
+    fn a_truncated_legacy_rotation_does_not_become_a_boolean_entry() {
+        let mut payload = vec![9, 8];
+        payload.extend([0u8; 11]);
+        payload.push(TERMINATOR);
+        let mut read: &[u8] = &payload;
+        let entries = EntityDataListT::for_version(V::V_1_15_2)
+            .read(&mut read)
+            .unwrap();
+        assert!(entries.is_empty());
+        assert!(
+            read.is_empty(),
+            "unmeasurable metadata is discarded as a suffix"
+        );
     }
 
     #[test]
@@ -306,27 +337,25 @@ mod tests {
         assert_eq!(out, payload);
     }
 
-    /// Core writes the option data of 26.3 whatever the layout, so the colour
-    /// is read below 1.20.5 too and the rewriter decides what becomes of it.
+    /// The 26.2 particle serializer and particle id still match the canonical
+    /// layout used by `read_particle`.
     #[test]
-    fn an_effect_particle_is_read_in_the_26_3_form_on_every_layout() {
+    fn an_effect_particle_is_read_in_the_canonical_layout_on_26_2() {
         let mut payload = vec![10u8, 16, effect_particle()];
         payload.extend([0x11, 0x22, 0x33, 0x44, 8, 0, 1, TERMINATOR]);
-        for layout in [V::V_1_20_3, V::V_26_2] {
-            let mut read: &[u8] = &payload;
-            let entries = EntityDataListT::for_version(layout)
-                .read(&mut read)
-                .unwrap();
-            assert_eq!(entries.len(), 2, "{layout}");
-            assert_eq!(
-                entries[0].value,
-                MetaValue::Particle(Particle {
-                    id: i32::from(ParticleKind::EntityEffect.to_id()),
-                    data: ParticleData::Color(0x1122_3344),
-                })
-            );
-            assert!(read.is_empty());
-        }
+        let mut read: &[u8] = &payload;
+        let entries = EntityDataListT::for_version(V::V_26_2)
+            .read(&mut read)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].value,
+            MetaValue::Particle(Particle {
+                id: i32::from(ParticleKind::EntityEffect.to_id()),
+                data: ParticleData::Color(0x1122_3344),
+            })
+        );
+        assert!(read.is_empty());
     }
 
     /// An empty stack is a single zero varint in the 26.3 form and stays one.

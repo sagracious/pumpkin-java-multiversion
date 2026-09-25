@@ -137,6 +137,8 @@ fn kind_for_name(name: &str) -> Option<MetaKind> {
 struct Tables {
     /// 26.3 serializer id to the id `version` uses for it.
     ids: Vec<(JavaMinecraftVersion, Vec<Option<i32>>)>,
+    /// Wire serializer id in `version` to the canonical 26.3 serializer id.
+    wire_to_current: Vec<(JavaMinecraftVersion, Vec<Option<i32>>)>,
     kinds: Vec<Option<MetaKind>>,
     names: HashMap<String, i32>,
 }
@@ -154,13 +156,15 @@ fn tables() -> &'static Tables {
         for (name, id) in &base {
             kinds[*id as usize] = kind_for_name(name);
         }
-        let ids = FILES
+        let (ids, wire_to_current): (Vec<_>, Vec<_>) = FILES
             .iter()
             .map(|file| {
                 let target = parse(file.json);
                 let mut table = vec![None; size];
+                let wire_size = target.values().copied().max().unwrap_or(0) as usize + 1;
+                let mut reverse = vec![None; wire_size];
                 for (name, id) in &base {
-                    table[*id as usize] = std::iter::once(name.as_str())
+                    let target_id = std::iter::once(name.as_str())
                         .chain(
                             ALIASES
                                 .iter()
@@ -169,12 +173,23 @@ fn tables() -> &'static Tables {
                                 .flat_map(|(_, to)| to.iter().copied()),
                         )
                         .find_map(|name| target.get(name).copied());
+                    table[*id as usize] = target_id;
+                    if let Some(target_id) = target_id {
+                        let slot = &mut reverse[target_id as usize];
+                        // 1.15.2/1.16 have one optional block-state serializer
+                        // where 26.3 distinguishes both forms. Treat that
+                        // legacy wire type as the optional canonical form.
+                        if slot.is_none() || name == "optional_block_state" {
+                            *slot = Some(*id);
+                        }
+                    }
                 }
-                (file.version, table)
+                ((file.version, table), (file.version, reverse))
             })
-            .collect();
+            .unzip();
         Tables {
             ids,
+            wire_to_current,
             kinds,
             names: base,
         }
@@ -200,6 +215,29 @@ pub fn meta_data_type_id_for_version(id: i32, version: JavaMinecraftVersion) -> 
 pub fn meta_data_type_id_for_name(name: &str, version: JavaMinecraftVersion) -> Option<i32> {
     let current_id = *tables().names.get(name)?;
     meta_data_type_id_for_version(current_id, version)
+}
+
+/// Maps a serializer id read from `version`'s metadata wire format back to
+/// the canonical 26.3 id used by `EntityDataEntry` and the global id-pass.
+/// Returns `None` below the oldest checked-in serializer table rather than
+/// interpreting an old id using the latest table.
+#[must_use]
+pub fn canonical_meta_data_type_id_for_version(
+    wire_id: i32,
+    version: JavaMinecraftVersion,
+) -> Option<i32> {
+    let tables = tables();
+    let (oldest, _) = tables.wire_to_current.first()?;
+    if version < *oldest {
+        return None;
+    }
+    let table = tables
+        .wire_to_current
+        .iter()
+        .rev()
+        .find(|(file, _)| *file <= version)
+        .map(|(_, table)| table)?;
+    table.get(usize::try_from(wire_id).ok()?).copied().flatten()
 }
 
 /// What a 26.3 serializer id writes, `None` for one this never sees on the wire.
@@ -299,6 +337,24 @@ mod tests {
             meta_data_type_id_for_name("long", V_1_21_9),
             meta_data_type_id_for_version(current_long, V_1_21_9)
         );
+    }
+
+    #[test]
+    fn legacy_wire_ids_reverse_to_canonical_types_per_version() {
+        for version in [V_1_15_2, V_1_16, V_1_16_1, V_1_16_2] {
+            assert_eq!(canonical_meta_data_type_id_for_version(7, version), Some(8));
+            // Wire id 8 is rotation (12 bytes), while canonical id 8 is bool.
+            assert_eq!(canonical_meta_data_type_id_for_version(8, version), Some(9));
+            assert_eq!(meta_kind(9), Some(MetaKind::Rotations));
+            assert_eq!(meta_kind(8), Some(MetaKind::Bool));
+            // The old protocol has only the optional block-state serializer.
+            assert_eq!(
+                canonical_meta_data_type_id_for_version(13, version),
+                Some(15)
+            );
+        }
+        assert_eq!(canonical_meta_data_type_id_for_version(8, V_1_14_4), None);
+        assert_eq!(canonical_meta_data_type_id_for_version(-1, V_1_16), None);
     }
 
     #[test]
