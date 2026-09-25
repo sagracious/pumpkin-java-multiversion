@@ -319,6 +319,9 @@ pub struct ComposedMappings {
     pub paintings: IdMapping,
     items_inverse: OnceLock<IdMapping>,
     data_component_type_inverse: OnceLock<IdMapping>,
+    blockstates_inverse: OnceLock<IdMapping>,
+    particles_inverse: OnceLock<IdMapping>,
+    paintings_inverse: OnceLock<IdMapping>,
 }
 
 impl ComposedMappings {
@@ -342,6 +345,9 @@ impl ComposedMappings {
             paintings: IdMapping::IDENTITY,
             items_inverse: OnceLock::new(),
             data_component_type_inverse: OnceLock::new(),
+            blockstates_inverse: OnceLock::new(),
+            particles_inverse: OnceLock::new(),
+            paintings_inverse: OnceLock::new(),
         }
     }
 
@@ -365,6 +371,9 @@ impl ComposedMappings {
             paintings: self.paintings.compose(&step.paintings),
             items_inverse: OnceLock::new(),
             data_component_type_inverse: OnceLock::new(),
+            blockstates_inverse: OnceLock::new(),
+            particles_inverse: OnceLock::new(),
+            paintings_inverse: OnceLock::new(),
         }
     }
 
@@ -379,6 +388,27 @@ impl ComposedMappings {
     pub fn data_component_type_inverse(&self) -> &IdMapping {
         self.data_component_type_inverse
             .get_or_init(|| self.data_component_type.inverse())
+    }
+
+    /// Target-version block state ids mapped back to their canonical 26.3 ids.
+    #[must_use]
+    pub fn blockstates_inverse(&self) -> &IdMapping {
+        self.blockstates_inverse
+            .get_or_init(|| self.blockstates.inverse())
+    }
+
+    /// Target-version particle ids mapped back to their canonical 26.3 ids.
+    #[must_use]
+    pub fn particles_inverse(&self) -> &IdMapping {
+        self.particles_inverse
+            .get_or_init(|| self.particles.inverse())
+    }
+
+    /// Target-version painting variant ids mapped back to canonical ids.
+    #[must_use]
+    pub fn paintings_inverse(&self) -> &IdMapping {
+        self.paintings_inverse
+            .get_or_init(|| self.paintings.inverse())
     }
 }
 

@@ -306,15 +306,35 @@ fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError
         // The item agent's `rewrite_item` fills this in; until then the packet
         // goes rather than a 26.3 stack.
         Shape::Item => return Err(TranslateError::Unsupported("item particle")),
-        Shape::Block => ParticleData::Block(u32::try_from(VAR_INT.read(r)?.0).unwrap_or(0)),
+        Shape::Block => {
+            let state = VAR_INT.read(r)?.0;
+            ParticleData::Block(
+                u32::try_from(state)
+                    .map_err(|_| TranslateError::Unsupported("particle block state id"))?,
+            )
+        }
         Shape::DustRgb => ParticleData::Dust {
             rgb: I32T.read(r)?,
+            scale: F32T.read(r)?,
+        },
+        Shape::DustFloats => ParticleData::Dust {
+            rgb: read_rgb_floats(r)?,
             scale: F32T.read(r)?,
         },
         Shape::TransitionRgb => ParticleData::Transition {
             from: I32T.read(r)?,
             to: I32T.read(r)?,
             scale: F32T.read(r)?,
+        },
+        Shape::TransitionScaleLast => ParticleData::Transition {
+            from: read_rgb_floats(r)?,
+            to: read_rgb_floats(r)?,
+            scale: F32T.read(r)?,
+        },
+        Shape::TransitionScaleMid => ParticleData::Transition {
+            from: read_rgb_floats(r)?,
+            scale: F32T.read(r)?,
+            to: read_rgb_floats(r)?,
         },
         Shape::VibrationTyped => {
             let source = if VAR_INT.read(r)?.0 == 0 {
@@ -340,6 +360,13 @@ fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError
             color: I32T.read(r)?,
             duration: VAR_INT.read(r)?.0,
         },
+        Shape::Trail => ParticleData::Trail {
+            x: F64T.read(r)?,
+            y: F64T.read(r)?,
+            z: F64T.read(r)?,
+            color: I32T.read(r)?,
+            duration: 0,
+        },
         Shape::Spell => ParticleData::Spell {
             color: I32T.read(r)?,
             power: F32T.read(r)?,
@@ -353,13 +380,39 @@ fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError
             impulse: F32T.read(r)?,
         },
         // Shapes no version at or above 26.2 writes.
-        Shape::DustFloats
-        | Shape::TransitionScaleLast
-        | Shape::TransitionScaleMid
-        | Shape::VibrationWithSource
-        | Shape::VibrationNamed
-        | Shape::Trail => return Err(TranslateError::Unsupported("particle option data")),
+        Shape::VibrationNamed => {
+            let source_name = STRING.read(r)?;
+            let source = if source_name.ends_with(":block") {
+                VibrationSource::Block(I64T.read(r)?)
+            } else if source_name.ends_with(":entity") {
+                VibrationSource::Entity {
+                    id: VAR_INT.read(r)?.0,
+                    y_offset: F32T.read(r)?,
+                }
+            } else {
+                return Err(TranslateError::Unsupported("vibration source"));
+            };
+            ParticleData::Vibration {
+                source,
+                ticks: VAR_INT.read(r)?.0,
+            }
+        }
+        Shape::VibrationWithSource => {
+            return Err(TranslateError::Unsupported("vibration source shape"));
+        }
     })
+}
+
+fn read_rgb_floats(r: &mut &[u8]) -> Result<i32, TranslateError> {
+    let mut rgb = 0i32;
+    for _ in 0..3 {
+        let channel = F32T.read(r)?;
+        if !channel.is_finite() {
+            return Err(TranslateError::Unsupported("non-finite particle color"));
+        }
+        rgb = (rgb << 8) | (channel.mul_add(255.0, 0.5).clamp(0.0, 255.0) as i32);
+    }
+    Ok(rgb)
 }
 
 fn rgb_floats(rgb: i32, out: &mut Vec<u8>) -> Result<(), TranslateError> {
@@ -493,6 +546,36 @@ pub fn read_particle(r: &mut &[u8]) -> Result<Particle, TranslateError> {
     let id = VAR_INT.read(r)?.0;
     let data = read_particle_data(r, id)?;
     Ok(Particle { id, data })
+}
+
+/// Reads a particle whose id and option data use `layout`, then returns its
+/// canonical 26.3 id and values. Shapes that do not carry enough information
+/// for the canonical form fail closed.
+pub fn read_particle_for_layout(
+    r: &mut &[u8],
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+) -> Result<Particle, TranslateError> {
+    let wire_id = VAR_INT.read(r)?.0;
+    let canonical_id = u32::try_from(wire_id)
+        .ok()
+        .and_then(|id| ids.particles_inverse().map(id))
+        .and_then(|id| i32::try_from(id).ok())
+        .ok_or(TranslateError::Unsupported("particle id reverse mapping"))?;
+    let mut data = read_data(r, shape_of(canonical_id, layout))?;
+    if let ParticleData::Block(wire_state) = data {
+        let canonical_state =
+            ids.blockstates_inverse()
+                .map(wire_state)
+                .ok_or(TranslateError::Unsupported(
+                    "particle block state reverse mapping",
+                ))?;
+        data = ParticleData::Block(canonical_state);
+    }
+    Ok(Particle {
+        id: canonical_id,
+        data,
+    })
 }
 
 /// The id `particle` has on `layout`, `None` when the client has no stand in.

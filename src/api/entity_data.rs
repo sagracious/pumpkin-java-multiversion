@@ -5,7 +5,7 @@ use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt, ReadingError, Writi
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::rewriter::item::rewrite_item_value;
-use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle};
+use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle_for_layout};
 use crate::api::types::{NbtT, STRING, VAR_INT, VAR_LONG, WireType};
 use crate::data::entity_data_types::{
     MetaKind, canonical_meta_data_type_id_for_version, meta_kind,
@@ -23,7 +23,8 @@ pub struct EntityDataEntry {
     pub value: MetaValue,
 }
 
-/// A value in the layout it was read in, with the registry ids it holds pulled out.
+/// A decoded value. Registry ids are canonicalized to 26.3; `Raw` payloads
+/// retain their layout-specific wire encoding.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MetaValue {
     Raw(Vec<u8>),
@@ -150,19 +151,49 @@ fn read_value(
             out.extend(raw(&VAR_INT, r)?);
             out
         }
-        MetaKind::BlockState => return Some(MetaValue::BlockState(r.get_var_int().ok()?.0)),
+        MetaKind::BlockState => {
+            let wire_state = u32::try_from(r.get_var_int().ok()?.0).ok()?;
+            let canonical_state = ids.blockstates_inverse().map(wire_state)?;
+            return Some(MetaValue::BlockState(i32::try_from(canonical_state).ok()?));
+        }
         MetaKind::OptionalBlockState => {
-            return Some(MetaValue::OptionalBlockState(r.get_var_int().ok()?.0));
+            let wire_state = r.get_var_int().ok()?.0;
+            if wire_state == 0 {
+                return Some(MetaValue::OptionalBlockState(0));
+            }
+            let canonical_state = ids
+                .blockstates_inverse()
+                .map(u32::try_from(wire_state).ok()?)?;
+            return Some(MetaValue::OptionalBlockState(
+                i32::try_from(canonical_state).ok()?,
+            ));
         }
         MetaKind::PaintingVariant => {
-            return Some(MetaValue::PaintingVariant(r.get_var_int().ok()?.0));
+            let wire_variant = r.get_var_int().ok()?.0;
+            if wire_variant == 0 {
+                return Some(MetaValue::PaintingVariant(0));
+            }
+            let wire_variant = wire_variant.checked_sub(1)?;
+            let canonical_variant = ids
+                .paintings_inverse()
+                .map(u32::try_from(wire_variant).ok()?)?;
+            return Some(MetaValue::PaintingVariant(
+                i32::try_from(canonical_variant).ok()?.checked_add(1)?,
+            ));
         }
-        MetaKind::Particle => return Some(MetaValue::Particle(read_particle(r).ok()?)),
+        MetaKind::Particle => {
+            return Some(MetaValue::Particle(
+                read_particle_for_layout(r, layout, ids).ok()?,
+            ));
+        }
         MetaKind::Particles => {
             let count = r.get_var_int().ok()?.0;
+            if !(0..=4096).contains(&count) {
+                return None;
+            }
             let mut particles = Vec::new();
             for _ in 0..count {
-                particles.push(read_particle(r).ok()?);
+                particles.push(read_particle_for_layout(r, layout, ids).ok()?);
             }
             return Some(MetaValue::Particles(particles));
         }
@@ -275,6 +306,75 @@ mod tests {
             read.is_empty(),
             "unmeasurable metadata is discarded as a suffix"
         );
+    }
+
+    #[test]
+    fn a_legacy_block_state_is_normalized_before_the_global_forward_map() {
+        let layout = V::V_1_16_2;
+        let ids = MappingData::get().composed(layout);
+        let canonical_state = (0..u32::try_from(ids.blockstates.len()).unwrap())
+            .find(|state| {
+                ids.blockstates.map(*state).is_some_and(|wire| {
+                    wire != *state && ids.blockstates_inverse().map(wire) == Some(*state)
+                })
+            })
+            .expect("a block state whose id changes on 1.16.2");
+        let wire_state = ids.blockstates.map(canonical_state).unwrap();
+        let mut payload = vec![8u8, 13]; // 1.16 optional block-state serializer
+        VAR_INT
+            .write(&mut payload, &VarInt(i32::try_from(wire_state).unwrap()))
+            .unwrap();
+        payload.push(TERMINATOR);
+
+        let mut read: &[u8] = &payload;
+        let entries = EntityDataListT::for_version(layout)
+            .read(&mut read)
+            .unwrap();
+        assert_eq!(
+            entries[0].serializer, 15,
+            "canonical optional-blockstate id"
+        );
+        assert_eq!(
+            entries[0].value,
+            MetaValue::OptionalBlockState(i32::try_from(canonical_state).unwrap())
+        );
+        assert!(read.is_empty());
+    }
+
+    #[test]
+    fn a_1_16_float_dust_shape_and_particle_id_become_canonical() {
+        let layout = V::V_1_16;
+        let ids = MappingData::get().composed(layout);
+        let dust = i32::from(ParticleKind::Dust.to_id());
+        let wire_dust = ids.particles.map(u32::try_from(dust).unwrap()).unwrap();
+        let mut payload = vec![10u8, 15]; // legacy particle serializer
+        VAR_INT
+            .write(&mut payload, &VarInt(i32::try_from(wire_dust).unwrap()))
+            .unwrap();
+        for color in [1.0f32, 0.0, 0.5, 1.0] {
+            F32T.write(&mut payload, &color).unwrap();
+        }
+        payload.push(TERMINATOR);
+
+        let mut read: &[u8] = &payload;
+        let entries = EntityDataListT::for_version(layout)
+            .read(&mut read)
+            .unwrap();
+        assert_eq!(
+            entries[0].serializer, 16,
+            "canonical particle serializer id"
+        );
+        assert_eq!(
+            entries[0].value,
+            MetaValue::Particle(Particle {
+                id: dust,
+                data: ParticleData::Dust {
+                    rgb: 0xff0080,
+                    scale: 1.0,
+                },
+            })
+        );
+        assert!(read.is_empty());
     }
 
     #[test]
