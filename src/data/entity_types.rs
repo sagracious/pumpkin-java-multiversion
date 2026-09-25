@@ -6,6 +6,11 @@ use pumpkin_util::version::JavaMinecraftVersion::{self, *};
 /// Entity replacements used by ViaBackwards from the 1.21.11 to 1.21.9 step.
 #[must_use]
 pub fn stand_in_type_for_version(entity_type: u16, version: JavaMinecraftVersion) -> u16 {
+    // Sulfur cubes only exist from 26.2. ViaBackwards renders them as slimes
+    // for clients whose registry predates the new entity.
+    if version < V_26_2 && entity_type == EntityType::SULFUR_CUBE.id {
+        return EntityType::SLIME.id;
+    }
     if version > V_1_21_9 {
         return entity_type;
     }
@@ -101,6 +106,25 @@ mod tests {
             assert_eq!(stand_in_type_for_version(source, V_1_21_11), source);
             assert_eq!(stand_in_type_for_version(source, V_26_2), source);
         }
+    }
+
+    #[test]
+    fn sulfur_cubes_use_the_26_1_slime_stand_in() {
+        for version in [V_26_1, V_1_21_11, V_1_16_2] {
+            assert_eq!(
+                stand_in_type_for_version(EntityType::SULFUR_CUBE.id, version),
+                EntityType::SLIME.id,
+                "{version}"
+            );
+        }
+        assert_eq!(
+            stand_in_type_for_version(EntityType::SULFUR_CUBE.id, V_26_2),
+            EntityType::SULFUR_CUBE.id
+        );
+        assert_eq!(
+            stand_in_type_for_version(EntityType::SULFUR_CUBE.id, V_26_3),
+            EntityType::SULFUR_CUBE.id
+        );
     }
 
     #[test]
