@@ -49,6 +49,10 @@ impl Protocol for Protocol1_15To1_14_4 {
     fn register(&self, registry: &mut Registry) {
         registry.clientbound(&clientbound::play::EXPLODE, explosion);
         registry.clientbound_layout(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk);
+        // These fallback converters accept a v1.15-form payload if an earlier
+        // stage leaves it intact. Pumpkin's version-aware CLogin/CRespawn
+        // writers already emit native v1.14.4 fields, so the core's lower
+        // floors make Registered::runs skip them for ordinary 1.14.4 clients.
         registry.clientbound_layout(&clientbound::play::LOGIN, login);
         registry.clientbound_layout(&clientbound::play::RESPAWN, respawn);
         registry.clientbound(&clientbound::play::GAME_EVENT, game_event);
@@ -702,6 +706,67 @@ mod tests {
             unpack_contiguous(&packed, 9).unwrap(),
             values.iter().map(|v| *v as u32).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn layout_handlers_match_the_core_floors_for_1_14_4_clients() {
+        let step = Protocol1_15To1_14_4.step();
+        let mut registry = Registry::default();
+        Protocol1_15To1_14_4.register(&mut registry);
+        let client = V::V_1_14_4;
+
+        for packet in [&clientbound::play::LOGIN, &clientbound::play::RESPAWN] {
+            let layout = crate::pipeline::core_layout::core_layout_floor(packet).max(client);
+            assert_eq!(layout, client);
+            let handler = registry.clientbound_handler(packet).unwrap();
+            assert!(handler.layout);
+            assert!(!handler.runs(step.from, layout));
+        }
+
+        let chunk_layout = crate::pipeline::core_layout::core_layout_floor(
+            &clientbound::play::LEVEL_CHUNK_WITH_LIGHT,
+        )
+        .max(client);
+        let chunk = registry
+            .clientbound_handler(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT)
+            .unwrap();
+        assert_eq!(chunk_layout, V::V_1_18);
+        assert!(chunk.layout);
+        assert!(chunk.runs(step.from, chunk_layout));
+
+        for packet in [
+            &clientbound::play::EXPLODE,
+            &clientbound::play::GAME_EVENT,
+            &clientbound::play::SET_HEALTH,
+            &clientbound::play::UPDATE_ATTRIBUTES,
+            &clientbound::play::ADD_ENTITY,
+        ] {
+            let handler = registry.clientbound_handler(packet).unwrap();
+            assert!(!handler.layout);
+            assert!(handler.runs(step.from, client));
+        }
+
+        let edit_book_layout =
+            crate::pipeline::core_layout::core_read_floor(&serverbound::play::EDIT_BOOK, client);
+        assert_eq!(edit_book_layout, client);
+        let edit_book = registry
+            .serverbound_handler(&serverbound::play::EDIT_BOOK)
+            .unwrap();
+        assert!(!edit_book.layout);
+        assert!(edit_book.runs(step.from, edit_book_layout));
+
+        // The source-only living/player packet statics have no 26.3 wire id;
+        // these handlers run only if a preceding chain step has already
+        // changed `wrapper.packet` to one of the old packet kinds.
+        for packet in [
+            &clientbound::play::SPAWN_LIVING_ENTITY,
+            &clientbound::play::SPAWN_PLAYER,
+        ] {
+            assert_eq!(packet.to_id(V::V_26_3), -1);
+            let handler = registry.clientbound_handler(packet).unwrap();
+            assert!(handler.layout);
+            assert!(handler.runs(step.from, V::V_26_3));
+        }
     }
 
     #[test]
