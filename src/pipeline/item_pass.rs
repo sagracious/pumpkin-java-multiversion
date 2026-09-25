@@ -1,8 +1,7 @@
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
-use crate::api::rewriter::item::{
-    ClientItemT, StructuredItemRewriter, item_pass, map_component_id_from_client,
-};
+use crate::api::rewriter::item::{ClientItemT, StructuredItemRewriter, item_pass};
+use crate::api::rewriter::item_backup::{restore_full_item, rewrite_hashed_item};
 use crate::api::types::{
     BOOL, F32T, HASHED_ITEM, I8, I16T, I32T, I64T, ITEM_COST, STRING, TEMPLATE_ITEM,
     TextComponentT, U8, VAR_INT,
@@ -21,7 +20,7 @@ fn container_id(wrapper: &mut PacketWrapper, layout: V) -> Result<(), TranslateE
 
 pub fn container_content(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -36,17 +35,17 @@ pub fn container_content(
         return Err(TranslateError::Unsupported("container slot count"));
     }
     for _ in 0..count {
-        item_pass(wrapper, layout, ids)?;
+        item_pass(wrapper, connection, layout, ids)?;
     }
     if layout >= V::V_1_17_1 {
-        item_pass(wrapper, layout, ids)?;
+        item_pass(wrapper, connection, layout, ids)?;
     }
     Ok(())
 }
 
 pub fn container_slot(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -55,32 +54,32 @@ pub fn container_slot(
         wrapper.passthrough(&VAR_INT)?;
     }
     wrapper.passthrough(&I16T)?;
-    item_pass(wrapper, layout, ids)
+    item_pass(wrapper, connection, layout, ids)
 }
 
 pub fn cursor_item(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    item_pass(wrapper, layout, ids)
+    item_pass(wrapper, connection, layout, ids)
 }
 
 pub fn player_inventory(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     wrapper.passthrough(&VAR_INT)?;
-    item_pass(wrapper, layout, ids)
+    item_pass(wrapper, connection, layout, ids)
 }
 
 /// From 1.16 the entries run until one without the continuation bit.
 pub fn equipment(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -92,7 +91,7 @@ pub fn equipment(
     if layout >= V::V_1_16 {
         loop {
             let slot = wrapper.passthrough(&U8)?;
-            item_pass(wrapper, layout, ids)?;
+            item_pass(wrapper, connection, layout, ids)?;
             if slot & 0x80 == 0 {
                 break;
             }
@@ -104,14 +103,14 @@ pub fn equipment(
     } else {
         wrapper.passthrough(&I16T)?;
     }
-    item_pass(wrapper, layout, ids)
+    item_pass(wrapper, connection, layout, ids)
 }
 
 /// A trade's two costs are the item cost form from 1.20.5 and plain stacks
 /// below it.
 pub fn merchant_offers(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -126,16 +125,16 @@ pub fn merchant_offers(
     }
     for _ in 0..offers {
         if layout >= V::V_1_20_5 {
-            cost(wrapper, layout, ids)?;
-            item_pass(wrapper, layout, ids)?;
+            cost(wrapper, connection, layout, ids)?;
+            item_pass(wrapper, connection, layout, ids)?;
             if wrapper.passthrough(&BOOL)? {
-                cost(wrapper, layout, ids)?;
+                cost(wrapper, connection, layout, ids)?;
             }
         } else {
             // The second cost is a bare slot; an absent one is an empty stack,
             // which is the same single byte core writes for it.
             for _ in 0..3 {
-                item_pass(wrapper, layout, ids)?;
+                item_pass(wrapper, connection, layout, ids)?;
             }
         }
         wrapper.passthrough(&BOOL)?;
@@ -154,17 +153,21 @@ pub fn merchant_offers(
 
 fn cost(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     let item = wrapper.read(&ITEM_COST)?;
-    let out = StructuredItemRewriter::to_version(&item, layout, ids);
+    let mut out = StructuredItemRewriter::to_version(&item, layout, ids);
+    crate::api::rewriter::item_backup::backup_clientbound_item(
+        connection, &item, &mut out, layout, ids,
+    );
     wrapper.write(&ITEM_COST, &out)
 }
 
 pub fn advancements(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -182,7 +185,7 @@ pub fn advancements(
         if wrapper.passthrough(&BOOL)? {
             wrapper.passthrough(&text)?;
             wrapper.passthrough(&text)?;
-            icon(wrapper, layout, ids)?;
+            icon(wrapper, connection, layout, ids)?;
             wrapper.passthrough(&VAR_INT)?;
             let flags = wrapper.passthrough(&I32T)?;
             if flags & 1 != 0 {
@@ -240,25 +243,31 @@ fn strings(wrapper: &mut PacketWrapper) -> Result<(), TranslateError> {
 /// An advancement icon is the template form from 26.1 and a plain stack below.
 fn icon(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     if layout < V::V_26_1 {
-        return item_pass(wrapper, layout, ids);
+        return item_pass(wrapper, connection, layout, ids);
     }
     let item = wrapper.read(&TEMPLATE_ITEM)?;
-    let out = StructuredItemRewriter::to_version(&item, layout, ids);
+    let mut out = StructuredItemRewriter::to_version(&item, layout, ids);
+    crate::api::rewriter::item_backup::backup_clientbound_item(
+        connection, &item, &mut out, layout, ids,
+    );
     wrapper.write(&TEMPLATE_ITEM, &out)
 }
 
 pub fn creative_slot(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     wrapper.passthrough(&I16T)?;
-    wrapper.passthrough(&ClientItemT::new(layout, ids))?;
+    let mut item = wrapper.read(&ClientItemT::new(layout, ids))?;
+    restore_full_item(connection, &mut item, layout, ids);
+    wrapper.write(&ClientItemT::new(layout, ids), &item)?;
     Ok(())
 }
 
@@ -290,43 +299,26 @@ pub fn click_container(
     if !(0..=256).contains(&changed) {
         return Err(TranslateError::Unsupported("changed slot count"));
     }
+    let source = connection.version;
     for _ in 0..changed {
         wrapper.passthrough(&I16T)?;
-        clicked(wrapper, ids, connection.version)?;
+        clicked(wrapper, connection, ids, source)?;
     }
-    clicked(wrapper, ids, connection.version)
+    clicked(wrapper, connection, ids, source)
 }
 
 fn clicked(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     ids: &ComposedMappings,
     source: V,
 ) -> Result<(), TranslateError> {
     let hashed = wrapper.read(&HASHED_ITEM)?;
     let out = hashed.and_then(|mut item| {
-        item.id = map(ids.items_inverse(), item.id)?;
-        item.added.retain(|(id, _)| {
-            map_component_id_from_client(*id, source, ids.data_component_type_inverse()).is_some()
-        });
-        for entry in &mut item.added {
-            entry.0 =
-                map_component_id_from_client(entry.0, source, ids.data_component_type_inverse())?;
-        }
-        item.removed = item
-            .removed
-            .iter()
-            .filter_map(|id| {
-                map_component_id_from_client(*id, source, ids.data_component_type_inverse())
-            })
-            .collect();
+        rewrite_hashed_item(connection, &mut item, source, ids)?;
         Some(item)
     });
     wrapper.write(&HASHED_ITEM, &out)
-}
-
-fn map(mapping: &crate::api::IdMapping, id: i32) -> Option<i32> {
-    let id = u32::try_from(id).ok()?;
-    i32::try_from(mapping.map(id)?).ok()
 }
 
 #[cfg(test)]

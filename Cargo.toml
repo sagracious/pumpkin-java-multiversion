@@ -1,6 +1,6 @@
 [package]
 name = "pumpkin-java-multiversion"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2024"
 authors = ["Pumpkin Developer"]
 description = "Multi-version Java Edition protocol support plugin for Pumpkin"
@@ -19,6 +19,7 @@ pumpkin-protocol = { path = "../Pumpkin/crates/pumpkin-protocol", version = "0.2
 pumpkin-util = { path = "../Pumpkin/crates/pumpkin-util", version = "0.2" }
 pumpkin-nbt = { path = "../Pumpkin/crates/pumpkin-nbt", version = "0.2" }
 pumpkin-data = { path = "../Pumpkin/crates/pumpkin-data", version = "0.2" }
+crc-fast = "1.10.0"
 tracing = "0.1"
 serde_json = "1.0"
 flate2 = "1.0"

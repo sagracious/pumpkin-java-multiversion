@@ -7,7 +7,7 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::{item_component, item_nbt};
 use crate::api::types::{Item, ItemComponent, ItemT, WireType, component_payload_len};
-use crate::api::{ComposedMappings, IdMapping, PacketWrapper, TranslateError};
+use crate::api::{ComposedMappings, IdMapping, PacketWrapper, TranslateError, UserConnection};
 
 pub struct StructuredItemRewriter;
 
@@ -590,11 +590,13 @@ pub fn rewrite_item_value(input: &mut &[u8], layout: V, ids: &ComposedMappings) 
 
 pub fn item_pass(
     wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     let item = wrapper.read(&ClientboundItemT::new(layout, ids))?;
-    let out = StructuredItemRewriter::to_version(&item, layout, ids);
+    let mut out = StructuredItemRewriter::to_version(&item, layout, ids);
+    super::item_backup::backup_clientbound_item(connection, &item, &mut out, layout, ids);
     wrapper.write(&ItemT::for_version(layout), &out)
 }
 
@@ -603,7 +605,7 @@ fn map(mapping: &IdMapping, id: i32) -> Option<i32> {
     i32::try_from(mapping.map(id)?).ok()
 }
 
-fn map_component_id(
+pub(crate) fn map_component_id(
     id: i32,
     component: DataComponent,
     target: V,

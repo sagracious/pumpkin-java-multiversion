@@ -3,6 +3,7 @@ pub mod chat;
 pub mod command;
 pub mod entity;
 pub mod item;
+pub mod item_backup;
 pub mod item_component;
 pub mod item_nbt;
 pub mod item_shape;
