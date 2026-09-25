@@ -1,6 +1,6 @@
 [package]
 name = "pumpkin-java-multiversion"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2024"
 authors = ["Pumpkin Developer"]
 description = "Multi-version Java Edition protocol support plugin for Pumpkin"

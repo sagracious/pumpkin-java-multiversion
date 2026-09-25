@@ -508,7 +508,8 @@ mod tests {
             assert_eq!(
                 client,
                 consume_effect_component_payload(component, None),
-                "{component:?} drops the 26.3-only field"
+                "{} drops the 26.3-only field",
+                component.to_name()
             );
             assert_eq!(
                 consume_effects_to_native(component, &client, V::V_26_2).unwrap(),
