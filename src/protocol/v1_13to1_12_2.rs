@@ -493,12 +493,21 @@ fn login_custom_query(
 ) -> Result<(), TranslateError> {
     let id = wrapper.read(&VAR_INT)?;
     wrapper.consume_remaining();
+    wrapper.send_serverbound(
+        &serverbound::login::CUSTOM_QUERY_ANSWER,
+        negative_login_query_answer(id)?,
+    );
+    wrapper.cancel();
+    Ok(())
+}
+
+/// A 1.12 client cannot answer the 1.13 login plugin query. Return a negative
+/// response on the serverbound login path so the pending connection can proceed.
+fn negative_login_query_answer(id: VarInt) -> Result<Vec<u8>, TranslateError> {
     let mut reply = Vec::new();
     VAR_INT.write(&mut reply, &id)?;
     BOOL.write(&mut reply, &false)?;
-    wrapper.send_reply(&serverbound::login::CUSTOM_QUERY_ANSWER, reply);
-    wrapper.cancel();
-    Ok(())
+    Ok(reply)
 }
 
 #[cfg(test)]
@@ -708,6 +717,20 @@ mod tests {
         )
         .unwrap();
         assert!(wrapper.is_cancelled());
+    }
+
+    #[test]
+    fn login_query_response_uses_the_serverbound_negative_answer_shape() {
+        let payload = negative_login_query_answer(VarInt(37)).unwrap();
+        let mut read = payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 37);
+        assert!(!BOOL.read(&mut read).unwrap());
+        assert!(read.is_empty());
+        assert_ne!(
+            serverbound::login::CUSTOM_QUERY_ANSWER.to_id(V1_12_2),
+            -1,
+            "the old client may decline a plugin query"
+        );
     }
 
     #[test]
