@@ -47,6 +47,10 @@ macro_rules! types {
 
 /// Oldest first; a version without a file of its own reads the newest older one.
 static FILES: &[TypeFile] = &[
+    // ViaVersion Types1_14 is shared by 1.15.2, 1.16 and 1.16.1.
+    types!(V_1_15_2, "1_15_2_meta_data_type.json"),
+    types!(V_1_16, "1_15_2_meta_data_type.json"),
+    types!(V_1_16_1, "1_15_2_meta_data_type.json"),
     types!(V_1_16_2, "1_16_2_meta_data_type.json"),
     types!(V_1_17, "1_17_meta_data_type.json"),
     types!(V_1_18, "1_18_meta_data_type.json"),
@@ -227,6 +231,47 @@ mod tests {
             meta_data_type_id_for_version(20, V_1_18_2),
             meta_data_type_id_for_version(20, V_1_18)
         );
+    }
+
+    #[test]
+    fn legacy_serializer_ids_are_defined_for_1_15_and_1_16() {
+        for version in [V_1_15_2, V_1_16, V_1_16_1] {
+            assert_eq!(
+                meta_data_type_id_for_name("byte", version),
+                Some(0),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("int", version),
+                Some(1),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("float", version),
+                Some(2),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("component", version),
+                Some(4),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("item_stack", version),
+                Some(6),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("particle", version),
+                Some(15),
+                "{version}"
+            );
+            assert_eq!(
+                meta_data_type_id_for_name("pose", version),
+                Some(18),
+                "{version}"
+            );
+        }
     }
 
     #[test]
