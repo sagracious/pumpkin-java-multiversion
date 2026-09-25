@@ -11,6 +11,10 @@ pub fn stand_in_type_for_version(entity_type: u16, version: JavaMinecraftVersion
     if version < V_26_2 && entity_type == EntityType::SULFUR_CUBE.id {
         return EntityType::SLIME.id;
     }
+    // ViaBackwards renders the new cushion entity as a falling block.
+    if version < V_26_3 && entity_type == EntityType::CUSHION.id {
+        return EntityType::FALLING_BLOCK.id;
+    }
     if version > V_1_21_9 {
         return entity_type;
     }
@@ -124,6 +128,18 @@ mod tests {
         assert_eq!(
             stand_in_type_for_version(EntityType::SULFUR_CUBE.id, V_26_3),
             EntityType::SULFUR_CUBE.id
+        );
+    }
+
+    #[test]
+    fn the_26_3_cushion_uses_a_falling_block_stand_in_below_26_3() {
+        assert_eq!(
+            stand_in_type_for_version(EntityType::CUSHION.id, V_26_2),
+            EntityType::FALLING_BLOCK.id
+        );
+        assert_eq!(
+            stand_in_type_for_version(EntityType::CUSHION.id, V_26_3),
+            EntityType::CUSHION.id
         );
     }
 

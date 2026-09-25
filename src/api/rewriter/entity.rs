@@ -10,7 +10,7 @@ use crate::api::connection::GameTimeStorage;
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
 use crate::api::rewriter::particle::write_particle;
 use crate::api::types::{VAR_INT, VAR_LONG, WireType};
-use crate::api::{PacketWrapper, TranslateError, UserConnection};
+use crate::api::{MappingData, PacketWrapper, TranslateError, UserConnection};
 use crate::data::entity_data_types::{
     MetaKind, meta_data_type_id_for_name, meta_data_type_id_for_version, meta_kind,
 };
@@ -65,6 +65,15 @@ fn rewrite_entries(
     entries
         .iter()
         .filter_map(|entry| {
+            // The 26.3 cushion is represented by a falling block for 26.2.
+            // Only base-entity metadata indices 0 through 7 are meaningful on
+            // that stand-in; ViaBackwards cancels every later field.
+            if server_entity_type == pumpkin_data::entity::EntityType::CUSHION.id
+                && client_entity_type == pumpkin_data::entity::EntityType::FALLING_BLOCK.id
+                && entry.index > 7
+            {
+                return None;
+            }
             if stand_in_metadata_removed(server_entity_type, entry.index, layout) {
                 return None;
             }
@@ -146,6 +155,9 @@ fn rewrite_value(
     ids: &ComposedMappings,
 ) -> Option<MetaValue> {
     Some(match value {
+        // `EntityDataListT::read_value` already routes nested item stacks
+        // through `rewrite_item_value` using this target layout. Rewriting
+        // again here would treat target ids as 26.3 ids and double-map them.
         MetaValue::Raw(_) | MetaValue::Item(_) => value.clone(),
         // A state the client lacks falls back to air, as every other state id does.
         MetaValue::BlockState(state) => MetaValue::BlockState(block_state(*state, ids)),
@@ -758,6 +770,111 @@ mod anger_time_tests {
         assert_eq!(VAR_INT.read(&mut read).unwrap().0, 0);
         assert_eq!(read, &[TERMINATOR]);
         remove_connection(key);
+    }
+}
+
+#[cfg(test)]
+mod cushion_and_nested_item_tests {
+    use super::*;
+    use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
+    use crate::api::types::{Item as WireItem, ItemComponent, ItemT, VAR_INT};
+    use crate::data::entity_data_types::meta_data_type_id_for_name;
+    use pumpkin_data::data_component::DataComponent;
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_protocol::codec::var_int::VarInt;
+    use pumpkin_protocol::ser::NetworkWriteExt;
+    use pumpkin_util::version::JavaMinecraftVersion as V;
+
+    #[test]
+    fn cushion_metadata_above_the_base_entity_fields_is_removed() {
+        let ids = MappingData::get().composed(V::V_26_2);
+        let serializer = meta_data_type_id_for_name("int", V::V_26_3).unwrap();
+        let entries: Vec<_> = (0..10)
+            .map(|index| EntityDataEntry {
+                index,
+                serializer,
+                value: MetaValue::Raw(vec![0]),
+            })
+            .collect();
+
+        let rewritten = rewrite_entries(
+            EntityType::CUSHION.id,
+            EntityType::FALLING_BLOCK.id,
+            &entries,
+            V::V_26_2,
+            ids,
+            0,
+        );
+        assert_eq!(
+            rewritten
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn item_inside_entity_metadata_uses_the_structured_rewriter() {
+        let mut animation = Vec::new();
+        VAR_INT.write(&mut animation, &VarInt(1)).unwrap(); // swing kind
+        VAR_INT.write(&mut animation, &VarInt(6)).unwrap(); // duration
+        let item = WireItem::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::DIAMOND.id),
+            added: vec![ItemComponent {
+                id: i32::from(DataComponent::InteractAnimation.to_id()),
+                data: animation,
+            }],
+            removed: Vec::new(),
+        };
+
+        let mut item_payload = Vec::new();
+        ItemT::for_version(V::V_26_3)
+            .write(&mut item_payload, &item)
+            .unwrap();
+        let entry = EntityDataEntry {
+            index: 0,
+            serializer: meta_data_type_id_for_name("item_stack", V::V_26_3).unwrap(),
+            value: MetaValue::Item(item_payload),
+        };
+        let mut metadata_26_3 = Vec::new();
+        EntityDataListT::for_version(V::V_26_3)
+            .write(&mut metadata_26_3, &vec![entry])
+            .unwrap();
+
+        // The list reader performs nested item conversion before rewrite_value
+        // forwards the already-target-shaped MetaValue::Item.
+        let mut input = metadata_26_3.as_slice();
+        let parsed = EntityDataListT::for_version(V::V_26_2)
+            .read(&mut input)
+            .expect("metadata list parses");
+        assert!(input.is_empty());
+        let ids = MappingData::get().composed(V::V_26_2);
+        let rewritten = rewrite_entries(
+            EntityType::PIG.id,
+            EntityType::PIG.id,
+            &parsed,
+            V::V_26_2,
+            ids,
+            0,
+        );
+        let MetaValue::Item(bytes) = &rewritten[0].value else {
+            panic!("item metadata stays an item");
+        };
+        let mut item_input = bytes.as_slice();
+        let mapped = ItemT::for_version(V::V_26_2)
+            .read(&mut item_input)
+            .expect("nested item uses target layout");
+        let WireItem::Structured { added, .. } = mapped else {
+            panic!("diamond remains a structured item");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            i32::from(DataComponent::AttackAnimation.to_id()),
+            "26.3 interact animation collapses onto 26.2 attack animation"
+        );
     }
 }
 

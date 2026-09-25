@@ -107,10 +107,18 @@ pub fn commands(
             // which is what its properties are replaced with.
             let keep =
                 mapped.is_some_and(|mapped| mapped != string_parser) || parser == STRING_PARSER;
+            let quotable_fallback = !keep && parser >= 62;
             wrapper.write(&VAR_INT, &VarInt(mapped.unwrap_or(string_parser)))?;
             properties(wrapper, parser, layout, keep)?;
             if !keep {
-                wrapper.write(&VAR_INT, &VarInt(0))?;
+                // ViaBackwards' 26.3 rewriter maps the newly added feature,
+                // slot_source, swing_animation and context provider parsers to
+                // brigadier:string with QUOTABLE_PHRASE. PJM has numeric ids
+                // rather than Via's parser-name table, so an unmapped 26.3
+                // parser uses that same safe quoting mode. The last known
+                // shared parser id is `uuid` (61); the five new 26.3 parsers
+                // are appended after it in the server's argument registry.
+                wrapper.write(&VAR_INT, &VarInt(if quotable_fallback { 1 } else { 0 }))?;
             }
         }
         if flags & HAS_SUGGESTION_TYPE != 0 {
@@ -192,6 +200,24 @@ mod tests {
         let out = run(&payload(17, &[]), version);
         let string = i32::try_from(ids.argumenttypes.map(5).unwrap()).unwrap();
         assert_eq!(out, payload(string, &[0]));
+    }
+
+    #[test]
+    fn a_263_only_parser_falls_back_to_a_quotable_string_for_262_clients() {
+        let mapping = MappingData::get();
+        let latest_target = mapping.composed(JavaMinecraftVersion::V_26_2);
+        let missing = (62u32..4096)
+            .find(|id| latest_target.argumenttypes.map(*id).is_none())
+            .expect("a 26.3-only argument type exists");
+        for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_16_2] {
+            let ids = mapping.composed(version);
+            let string = i32::try_from(ids.argumenttypes.map(5).unwrap()).unwrap();
+            assert_eq!(
+                run(&payload(i32::try_from(missing).unwrap(), &[]), version),
+                payload(string, &[1]),
+                "ViaBackwards uses the quotable-string parser for new command arguments on {version}"
+            );
+        }
     }
 
     /// Dialog is 58 and uuid 61 on 26.3; both are taken as core writes them.
