@@ -4,6 +4,7 @@ use pumpkin_protocol::ser::{NetworkReadExt, NetworkReadSliceExt, NetworkWriteExt
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::ComposedMappings;
+use crate::api::rewriter::item_shape::{self, Shape};
 use crate::api::types::{TEMPLATE_ITEM, WireType};
 
 /// Scratch buffers cannot run out of room, so the write errors of a byte
@@ -279,6 +280,9 @@ fn map_nested_ids(
     match component {
         C::Enchantments | C::StoredEnchantments => enchantment_ids(native, ids),
         C::AttributeModifiers => attribute_ids(native, ids),
+        C::Consumable | C::DeathProtection if target < V::V_26_3 => {
+            consume_effect_payload(component, native, true, false)
+        }
         C::EntityData => leading_id(native, &ids.entities),
         C::BlockEntityData => leading_id(native, &ids.blockentities),
         C::PaintingVariant => holder_id(native, &ids.paintings),
@@ -475,4 +479,139 @@ mod tests {
             assert!(copy_id_set(&mut cursor, &mut output).is_err());
         }
     }
+
+    fn consume_effect_component_payload(
+        component: DataComponent,
+        directional_particles: Option<bool>,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        if component == DataComponent::Consumable {
+            payload.write_f32_be(1.25).unwrap();
+            payload.write_var_int(&VarInt(0)).unwrap(); // animation
+            payload.write_var_int(&VarInt(1)).unwrap(); // sound holder
+            payload.write_bool(false).unwrap(); // consume particles
+        }
+        payload.write_var_int(&VarInt(1)).unwrap(); // effect count
+        payload.write_var_int(&VarInt(3)).unwrap(); // teleport randomly
+        payload.write_f32_be(16.0).unwrap();
+        if let Some(directional_particles) = directional_particles {
+            payload.write_bool(directional_particles).unwrap();
+        }
+        payload
+    }
+
+    #[test]
+    fn the_26_3_consume_effect_flag_is_removed_and_defaulted_for_26_2() {
+        for component in [DataComponent::Consumable, DataComponent::DeathProtection] {
+            let native = consume_effect_component_payload(component, Some(false));
+            let client = to_version(component, &native, V::V_26_2, ids()).unwrap();
+            assert_eq!(
+                client,
+                consume_effect_component_payload(component, None),
+                "{component:?} drops the 26.3-only field"
+            );
+            assert_eq!(
+                consume_effects_to_native(component, &client, V::V_26_2).unwrap(),
+                consume_effect_component_payload(component, Some(true)),
+                "older clients default to directional particles"
+            );
+        }
+    }
+}
+
+/// Expands a client-side pre-26.3 consume effect to the 26.3 form. The
+/// 26.2 format has no `directional_particles` field and defaults it to true.
+pub fn consume_effects_to_native(
+    component: DataComponent,
+    client: &[u8],
+    source: V,
+) -> Result<Vec<u8>, ReadingError> {
+    if source >= V::V_26_3 {
+        return Ok(client.to_vec());
+    }
+    consume_effect_payload(component, client, false, true)
+}
+
+fn consume_effect_payload(
+    component: DataComponent,
+    native: &[u8],
+    input_has_directional_particles: bool,
+    output_has_directional_particles: bool,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let mut out = Vec::with_capacity(native.len().saturating_add(4));
+    if component == DataComponent::Consumable {
+        for shape in [Shape::F32, Shape::VarInt, Shape::Sound, Shape::Bool] {
+            copy_shape(&shape, &mut cursor, &mut out)?;
+        }
+    } else if component != DataComponent::DeathProtection {
+        return Err(ReadingError::Message(
+            "consume-effect converter used for an unrelated component".into(),
+        ));
+    }
+
+    let count = cursor.get_var_int()?.0;
+    if !(0..=4096).contains(&count) {
+        return Err(ReadingError::Message(
+            "consume-effect count out of bounds".into(),
+        ));
+    }
+    out.write_var_int(&VarInt(count)).r()?;
+    for _ in 0..count {
+        copy_consume_effect(
+            &mut cursor,
+            &mut out,
+            input_has_directional_particles,
+            output_has_directional_particles,
+        )?;
+    }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "trailing bytes in consume-effect component".into(),
+        ));
+    }
+    Ok(out)
+}
+
+fn copy_consume_effect(
+    cursor: &mut &[u8],
+    out: &mut Vec<u8>,
+    input_has_directional_particles: bool,
+    output_has_directional_particles: bool,
+) -> Result<(), ReadingError> {
+    let effect_type = cursor.get_var_int()?.0;
+    out.write_var_int(&VarInt(effect_type)).r()?;
+    match effect_type {
+        0 => {
+            copy_shape(&Shape::StatusEffects, cursor, out)?;
+            copy_shape(&Shape::F32, cursor, out)?;
+        }
+        1 => copy_shape(&Shape::IdSet, cursor, out)?,
+        2 => {}
+        3 => {
+            copy_shape(&Shape::F32, cursor, out)?;
+            if input_has_directional_particles {
+                let directional = cursor.get_bool()?;
+                if output_has_directional_particles {
+                    out.write_bool(directional).r()?;
+                }
+            } else if output_has_directional_particles {
+                out.write_bool(true).r()?;
+            }
+        }
+        4 => copy_shape(&Shape::Sound, cursor, out)?,
+        other => {
+            return Err(ReadingError::Message(format!(
+                "unknown consume effect {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn copy_shape(shape: &Shape, cursor: &mut &[u8], out: &mut Vec<u8>) -> Result<(), ReadingError> {
+    let source = *cursor;
+    item_shape::skip(shape, cursor)?;
+    let consumed = source.len() - cursor.len();
+    out.write_slice(&source[..consumed]).r()
 }

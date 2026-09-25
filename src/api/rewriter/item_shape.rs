@@ -450,25 +450,7 @@ pub fn skip(shape: &Shape, r: &mut &[u8]) -> Result<(), ReadingError> {
             }
         }
         Shape::ConsumeEffect => {
-            // Core's writer puts the effects in front of the probability; its
-            // own reader has them the other way round.
-            match r.get_var_int()?.0 {
-                0 => {
-                    skip(&Shape::StatusEffects, r)?;
-                    r.get_i32_be()?;
-                }
-                1 => skip(&ID_SET, r)?,
-                2 => {}
-                3 => {
-                    r.get_i32_be()?;
-                }
-                4 => skip(&SOUND, r)?,
-                other => {
-                    return Err(ReadingError::Message(format!(
-                        "unknown consume effect {other}"
-                    )));
-                }
-            }
+            skip_consume_effect(r, true)?;
         }
         Shape::BoolSwitch(yes, no) => {
             let arm = if r.get_bool()? { yes } else { no };
@@ -518,6 +500,61 @@ pub fn payload_len(id: i32, bytes: &[u8]) -> Result<usize, ReadingError> {
     let mut cursor = bytes;
     skip(payload_shape(id)?, &mut cursor)?;
     Ok(bytes.len() - cursor.len())
+}
+
+/// Component size for a client-side layout. Pumpkin's 26.3 packet writer has
+/// the newer `directional_particles` bool; clients before 26.3 do not.
+pub fn payload_len_for_version(id: i32, bytes: &[u8], version: V) -> Result<usize, ReadingError> {
+    let component = u8::try_from(id)
+        .ok()
+        .and_then(DataComponent::try_from_id)
+        .ok_or_else(|| ReadingError::Message(format!("unknown component {id}")))?;
+    if version >= V::V_26_3
+        || !matches!(
+            component,
+            DataComponent::Consumable | DataComponent::DeathProtection
+        )
+    {
+        return payload_len(id, bytes);
+    }
+
+    let mut cursor = bytes;
+    if component == DataComponent::Consumable {
+        skip(&Shape::F32, &mut cursor)?;
+        skip(&Shape::VarInt, &mut cursor)?;
+        skip(&Shape::Sound, &mut cursor)?;
+        skip(&Shape::Bool, &mut cursor)?;
+    }
+    for _ in 0..count(&mut cursor)? {
+        skip_consume_effect(&mut cursor, false)?;
+    }
+    Ok(bytes.len() - cursor.len())
+}
+
+fn skip_consume_effect(r: &mut &[u8], has_directional_particles: bool) -> Result<(), ReadingError> {
+    // Core writes the effects before the probability. Its own reader has them
+    // the other way round.
+    match r.get_var_int()?.0 {
+        0 => {
+            skip(&Shape::StatusEffects, r)?;
+            r.get_i32_be()?;
+        }
+        1 => skip(&ID_SET, r)?,
+        2 => {}
+        3 => {
+            r.get_i32_be()?;
+            if has_directional_particles {
+                r.get_bool()?;
+            }
+        }
+        4 => skip(&SOUND, r)?,
+        other => {
+            return Err(ReadingError::Message(format!(
+                "unknown consume effect {other}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -656,6 +693,47 @@ mod tests {
         assert_eq!(
             payload_len(i32::from(DataComponent::ItemModel.to_id()), &bytes).unwrap(),
             len
+        );
+    }
+
+    #[test]
+    fn consume_effect_length_depends_on_the_client_version() {
+        let old_consumable = [
+            0x3f, 0x80, 0x00, 0x00, // consume seconds
+            0x00, // animation
+            0x01, // sound holder id
+            0x00, // consume particles
+            0x01, // one effect
+            0x03, // teleport randomly
+            0x41, 0x80, 0x00, 0x00, // diameter
+        ];
+        let mut new_consumable = old_consumable.to_vec();
+        new_consumable.push(0);
+        let id = i32::from(DataComponent::Consumable.to_id());
+        assert_eq!(
+            payload_len_for_version(id, &old_consumable, V::V_26_2).unwrap(),
+            old_consumable.len()
+        );
+        assert_eq!(
+            payload_len(id, &new_consumable).unwrap(),
+            new_consumable.len()
+        );
+
+        let old_death_protection = [
+            0x01, // one effect
+            0x03, // teleport randomly
+            0x41, 0x80, 0x00, 0x00, // diameter
+        ];
+        let mut new_death_protection = old_death_protection.to_vec();
+        new_death_protection.push(1);
+        let id = i32::from(DataComponent::DeathProtection.to_id());
+        assert_eq!(
+            payload_len_for_version(id, &old_death_protection, V::V_26_2).unwrap(),
+            old_death_protection.len()
+        );
+        assert_eq!(
+            payload_len(id, &new_death_protection).unwrap(),
+            new_death_protection.len()
         );
     }
 }

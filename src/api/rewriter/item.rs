@@ -151,6 +151,16 @@ pub fn read_client_item(
     length_prefixed: bool,
     ids: &ComposedMappings,
 ) -> Result<Item, ReadingError> {
+    read_client_item_with_direction(r, version, length_prefixed, true, ids)
+}
+
+fn read_client_item_with_direction(
+    r: &mut &[u8],
+    version: V,
+    length_prefixed: bool,
+    from_client: bool,
+    ids: &ComposedMappings,
+) -> Result<Item, ReadingError> {
     if version < ItemT::FIRST_STRUCTURED {
         let item = ItemT::for_version(version).read(r)?;
         return Ok(StructuredItemRewriter::to_native(&item, version, ids));
@@ -193,8 +203,10 @@ pub fn read_client_item(
             )));
         };
         let data = match body {
-            Some(mut body) => read_client_payload(native, &mut body, version, &enchantments)?,
-            None => read_client_payload(native, r, version, &enchantments)?,
+            Some(mut body) => {
+                read_client_payload(native, &mut body, version, &enchantments, from_client, true)?
+            }
+            None => read_client_payload(native, r, version, &enchantments, from_client, false)?,
         };
         if let Some(data) = data {
             added.push(ItemComponent {
@@ -241,8 +253,22 @@ fn read_client_payload(
     r: &mut &[u8],
     version: V,
     enchantments: &IdMapping,
+    from_client: bool,
+    length_prefixed: bool,
 ) -> Result<Option<Vec<u8>>, ReadingError> {
     use DataComponent as C;
+    if from_client && version < V::V_26_3 && matches!(component, C::Consumable | C::DeathProtection)
+    {
+        let len = if length_prefixed {
+            r.len()
+        } else {
+            super::item_shape::payload_len_for_version(i32::from(component.to_id()), r, version)?
+        };
+        let source = r.read_slice_borrowed(len)?;
+        return Ok(Some(item_component::consume_effects_to_native(
+            component, source, version,
+        )?));
+    }
     if version >= item_component::shape_floor(component) {
         let len = component_payload_len(i32::from(component.to_id()), r)?;
         let native = r.read_slice_borrowed(len)?.to_vec();
@@ -558,7 +584,7 @@ impl WireType for ClientboundItemT<'_> {
     type Value = Item;
 
     fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
-        read_client_item(r, self.version, false, self.ids)
+        read_client_item_with_direction(r, self.version, false, false, self.ids)
     }
 
     fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
@@ -1011,6 +1037,57 @@ mod tests {
             native.item_id(),
             Some(i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id))
         );
+    }
+
+    #[test]
+    fn a_26_2_consumable_click_adds_the_default_directional_flag() {
+        let version = V::V_26_2;
+        let ids = ids(version);
+        let component_id = map_component_id(
+            i32::from(DataComponent::Consumable.to_id()),
+            DataComponent::Consumable,
+            version,
+            ids,
+        )
+        .unwrap();
+        let item_id = map(
+            &ids.items,
+            i32::from(pumpkin_data::item::Item::GOLDEN_APPLE.id),
+        )
+        .unwrap();
+        let mut old_payload = Vec::new();
+        old_payload.write_f32_be(1.25).unwrap();
+        old_payload.write_var_int(&VarInt(0)).unwrap(); // animation
+        old_payload.write_var_int(&VarInt(1)).unwrap(); // sound holder
+        old_payload.write_bool(false).unwrap(); // consume particles
+        old_payload.write_var_int(&VarInt(1)).unwrap(); // effect count
+        old_payload.write_var_int(&VarInt(3)).unwrap(); // teleport randomly
+        old_payload.write_f32_be(16.0).unwrap();
+        let client_item = Item::Structured {
+            count: 1,
+            id: item_id,
+            added: vec![ItemComponent {
+                id: component_id,
+                data: old_payload.clone(),
+            }],
+            removed: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        ItemT::length_prefixed(version)
+            .write(&mut bytes, &client_item)
+            .unwrap();
+        let mut reader = bytes.as_slice();
+        let native = read_client_item(&mut reader, version, true, ids).unwrap();
+        assert!(reader.is_empty());
+        let Item::Structured { added, .. } = native else {
+            panic!("structured");
+        };
+        let component = added
+            .iter()
+            .find(|component| component.id == i32::from(DataComponent::Consumable.to_id()))
+            .unwrap();
+        old_payload.push(1); // 26.2 omits the flag; 26.3 defaults it to true.
+        assert_eq!(component.data, old_payload);
     }
 
     #[test]
