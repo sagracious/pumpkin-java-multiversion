@@ -463,12 +463,17 @@ mod tests {
         let Item::Structured { added, .. } = item else {
             panic!("structured");
         };
-        assert_eq!(added.len(), 1);
-        assert_eq!(
-            added[0].id,
-            i32::from(DataComponent::AttackAnimation.to_id())
+        assert_eq!(added.len(), 2, "animation plus its recovery marker");
+        let animation = added
+            .iter()
+            .find(|component| component.id == i32::from(DataComponent::AttackAnimation.to_id()))
+            .unwrap();
+        assert_eq!(animation.data, vec![1, 6]);
+        assert!(
+            added
+                .iter()
+                .any(|component| { component.id == i32::from(DataComponent::CustomData.to_id()) })
         );
-        assert_eq!(added[0].data, vec![1, 6]);
         assert!(
             ItemT::for_version(layout)
                 .read(&mut read)
