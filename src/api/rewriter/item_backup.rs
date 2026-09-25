@@ -452,9 +452,6 @@ fn via_backup_component(component: DataComponent) -> bool {
         component,
         DataComponent::AttackAnimation
             | DataComponent::InteractAnimation
-            | DataComponent::MapDecorations
-            | DataComponent::Consumable
-            | DataComponent::DeathProtection
             | DataComponent::SignTextFront
             | DataComponent::SignTextBack
     )
