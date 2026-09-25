@@ -715,6 +715,111 @@ mod tests {
     }
 
     #[test]
+    fn map_decoration_backup_round_trips_for_hash_clicks_and_full_items() {
+        let version = V::V_26_2;
+        let ids = MappingData::get().composed(version);
+        let mut decoration = NbtCompound::new();
+        decoration.put_string("type", "abandoned_camp".to_owned());
+        decoration.put_int("x", -24);
+        decoration.put_int("z", 31);
+        decoration.put_float("rotation", 1.5);
+        let mut decorations = NbtCompound::new();
+        decorations.put("camp", NbtTag::Compound(decoration));
+        let mut map_payload = Vec::new();
+        map_payload
+            .write_nbt_with_version(
+                Some(&NbtTag::Compound(decorations)),
+                &V::V_26_3,
+            )
+            .unwrap();
+
+        let native_component = ItemComponent {
+            id: i32::from(DataComponent::MapDecorations.to_id()),
+            data: map_payload,
+        };
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::FILLED_MAP.id),
+            added: vec![native_component.clone()],
+            removed: Vec::new(),
+        };
+        let mut downgraded = StructuredItemRewriter::to_version(&native, version, ids);
+        let mut connection = UserConnection::new(27, version);
+        backup_clientbound_item(&mut connection, &native, &mut downgraded, version, ids);
+
+        let Item::Structured {
+            id: client_item_id,
+            added: client_components,
+            ..
+        } = &downgraded
+        else {
+            panic!("downgraded item remains structured");
+        };
+        let map_decorations_id = map_component_id(
+            i32::from(DataComponent::MapDecorations.to_id()),
+            DataComponent::MapDecorations,
+            version,
+            ids,
+        )
+        .expect("map decorations has a 26.2 component id");
+        let downgraded_map = client_components
+            .iter()
+            .find(|component| component.id == map_decorations_id)
+            .expect("downgraded map decorations");
+        let mut map_reader = downgraded_map.data.as_slice();
+        let Some(NbtTag::Compound(downgraded_decorations)) = map_reader.get_nbt(&V::V_26_3).unwrap()
+        else {
+            panic!("downgraded map decorations remain a compound");
+        };
+        let entry = downgraded_decorations
+            .get("camp")
+            .and_then(NbtTag::extract_compound)
+            .expect("map decoration entry");
+        assert_eq!(entry.get_string("type").as_deref(), Some("village_plains"));
+        assert_eq!(entry.get_int("x"), Some(-24));
+        assert_eq!(entry.get_int("z"), Some(31));
+        assert_eq!(entry.get_float("rotation"), Some(1.5));
+
+        let custom_data_id = map_component_id(
+            i32::from(DataComponent::CustomData.to_id()),
+            DataComponent::CustomData,
+            version,
+            ids,
+        )
+        .unwrap();
+        let custom_data = client_components
+            .iter()
+            .find(|component| component.id == custom_data_id)
+            .expect("round-trip marker");
+        let custom_hash = hash_compound(&read_custom_data(&custom_data.data).unwrap()).unwrap();
+        let mut clicked = HashedItem {
+            id: *client_item_id,
+            count: 1,
+            added: vec![(custom_data_id, custom_hash), (map_decorations_id, 123)],
+            removed: Vec::new(),
+        };
+        rewrite_hashed_item(&connection, &mut clicked, version, ids).unwrap();
+        assert!(clicked.added.contains(&(
+            native_component.id,
+            component_hash(&native_component).unwrap()
+        )));
+
+        let mut client_bytes = Vec::new();
+        ItemT::for_version(version)
+            .write(&mut client_bytes, &downgraded)
+            .unwrap();
+        let mut client_reader = client_bytes.as_slice();
+        let client_item = ItemT::for_version(version).read(&mut client_reader).unwrap();
+        assert!(client_reader.is_empty());
+        let mut full_item = StructuredItemRewriter::to_native(&client_item, version, ids);
+        restore_full_item(&connection, &mut full_item, version, ids);
+        let Item::Structured { added, .. } = full_item else {
+            panic!("restored item remains structured");
+        };
+        assert_eq!(added, vec![native_component]);
+    }
+
+    #[test]
     fn backup_and_restore_preserve_preexisting_custom_data() {
         let version = V::V_26_2;
         let ids = MappingData::get().composed(version);

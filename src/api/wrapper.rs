@@ -7,8 +7,14 @@ use crate::packet::mappings::PacketId;
 pub struct Translated {
     pub packet: &'static PacketId,
     pub payload: Vec<u8>,
+    /// Packets sent in addition to the translated packet.
     pub extra: Vec<(&'static PacketId, Vec<u8>)>,
+    /// Clientbound packets that answer a serverbound packet.
     pub replies: Vec<(&'static PacketId, Vec<u8>)>,
+    /// Native serverbound packets to process after this packet.
+    pub serverbound: Vec<(&'static PacketId, Vec<u8>)>,
+    /// Whether the original packet must be suppressed.
+    pub cancelled: bool,
 }
 
 pub struct PacketWrapper<'a> {
@@ -19,6 +25,7 @@ pub struct PacketWrapper<'a> {
     cancelled: bool,
     extra: Vec<(&'static PacketId, Vec<u8>)>,
     replies: Vec<(&'static PacketId, Vec<u8>)>,
+    serverbound: Vec<(&'static PacketId, Vec<u8>)>,
 }
 
 impl<'a> PacketWrapper<'a> {
@@ -32,6 +39,7 @@ impl<'a> PacketWrapper<'a> {
             cancelled: false,
             extra: Vec::new(),
             replies: Vec::new(),
+            serverbound: Vec::new(),
         }
     }
 
@@ -110,6 +118,11 @@ impl<'a> PacketWrapper<'a> {
         self.replies.push((packet, payload));
     }
 
+    /// Adds a native 26.3 packet for Pumpkin to process before the translated original.
+    pub fn send_serverbound(&mut self, packet: &'static PacketId, payload: Vec<u8>) {
+        self.serverbound.push((packet, payload));
+    }
+
     /// Makes what has been written so far the input of the next step. A step
     /// that has not read or written anything leaves the input as it is.
     pub fn reset(&mut self) {
@@ -122,19 +135,31 @@ impl<'a> PacketWrapper<'a> {
 
     /// `Ok(None)` when cancelled, `Err(TrailingBytes)` when input is left.
     pub fn finish(self) -> Result<Option<Translated>, TranslateError> {
-        if self.cancelled {
+        let translated = self.finish_with_outputs()?;
+        if translated.cancelled {
             return Ok(None);
         }
-        let left = self.input.len() - self.pos;
-        if left != 0 {
-            return Err(TranslateError::TrailingBytes(left));
+        Ok(Some(translated))
+    }
+
+    /// Finishes a wrapper while retaining follow-up packets when the original
+    /// packet is cancelled. Via can cancel one packet and still send a reply
+    /// or replacement packet, so the host adapter must receive both outcomes.
+    pub fn finish_with_outputs(self) -> Result<Translated, TranslateError> {
+        if !self.cancelled {
+            let left = self.input.len() - self.pos;
+            if left != 0 {
+                return Err(TranslateError::TrailingBytes(left));
+            }
         }
-        Ok(Some(Translated {
+        Ok(Translated {
             packet: self.packet,
             payload: self.output,
             extra: self.extra,
             replies: self.replies,
-        }))
+            serverbound: self.serverbound,
+            cancelled: self.cancelled,
+        })
     }
 }
 
@@ -186,5 +211,26 @@ mod tests {
         let mut wrapper = PacketWrapper::new(&BLOCK_UPDATE, &[0x01]);
         wrapper.cancel();
         assert!(wrapper.finish().unwrap().is_none());
+    }
+
+    #[test]
+    fn cancellation_keeps_via_follow_up_packets_for_the_host() {
+        let mut wrapper = PacketWrapper::new(&BLOCK_UPDATE, &[0x01]);
+        wrapper.send_extra(&SET_SCORE, vec![1, 2, 3]);
+        wrapper.send_reply(&SET_SCORE, vec![4, 5, 6]);
+        wrapper.send_serverbound(&SET_SCORE, vec![7, 8, 9]);
+        wrapper.cancel();
+
+        let translated = wrapper.finish_with_outputs().unwrap();
+        assert!(translated.cancelled);
+        assert_eq!(translated.extra.len(), 1);
+        assert!(std::ptr::eq(translated.extra[0].0, &SET_SCORE));
+        assert_eq!(translated.extra[0].1.as_slice(), &[1, 2, 3]);
+        assert_eq!(translated.replies.len(), 1);
+        assert!(std::ptr::eq(translated.replies[0].0, &SET_SCORE));
+        assert_eq!(translated.replies[0].1.as_slice(), &[4, 5, 6]);
+        assert_eq!(translated.serverbound.len(), 1);
+        assert!(std::ptr::eq(translated.serverbound[0].0, &SET_SCORE));
+        assert_eq!(translated.serverbound[0].1.as_slice(), &[7, 8, 9]);
     }
 }

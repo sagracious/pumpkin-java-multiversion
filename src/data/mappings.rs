@@ -64,6 +64,19 @@ const STEPS: &[StepFile] = &[
     step!(V_1_17, V_1_16_4, "mappings-1.17to1.16.2.nbt"),
     step!(V_1_16_4, V_1_16_3),
     step!(V_1_16_3, V_1_16_2),
+    // Via's 1.16.2→1.16 mapping is shared by 1.16.1, whose registry IDs are
+    // unchanged from 1.16.0.
+    step!(V_1_16_2, V_1_16_1, "mappings-1.16.2to1.16.nbt"),
+    step!(V_1_16_1, V_1_16),
+    step!(V_1_16, V_1_15_2, "mappings-1.16to1.15.nbt"),
+    step!(V_1_15_2, V_1_15_1),
+    step!(V_1_15_1, V_1_15),
+    step!(V_1_15, V_1_14_4, "mappings-1.15to1.14.nbt"),
+    step!(V_1_14_4, V_1_14_3),
+    step!(V_1_14_3, V_1_14_2),
+    step!(V_1_14_2, V_1_14_1),
+    step!(V_1_14_1, V_1_14),
+    step!(V_1_14, V_1_13_2, "mappings-1.14to1.13.2.nbt"),
 ];
 
 struct StepOverride {

@@ -115,11 +115,16 @@ pub fn translate_clientbound(
         }
 
         let translated = wrapper
-            .finish()
+            .finish_with_outputs()
             .map_err(|error| dropped(packet, version, "finish", &error))
-            .ok()
-            .flatten()?;
-        if translated.packet.to_id(version) == -1 {
+            .ok()?;
+        if translated.cancelled
+            && translated.extra.is_empty()
+            && translated.serverbound.is_empty()
+        {
+            return None;
+        }
+        if !translated.cancelled && translated.packet.to_id(version) == -1 {
             return None;
         }
         Some(translated)
@@ -181,11 +186,16 @@ pub fn translate_serverbound(
         }
 
         let translated = wrapper
-            .finish()
+            .finish_with_outputs()
             .map_err(|error| dropped(packet, version, "finish", &error))
-            .ok()
-            .flatten()?;
-        if translated.packet.v26_3 == -1 {
+            .ok()?;
+        if translated.cancelled
+            && translated.replies.is_empty()
+            && translated.serverbound.is_empty()
+        {
+            return None;
+        }
+        if !translated.cancelled && translated.packet.v26_3 == -1 {
             return None;
         }
         Some(translated)

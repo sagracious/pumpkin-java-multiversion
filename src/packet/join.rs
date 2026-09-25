@@ -14,10 +14,10 @@ use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 use pumpkin_util::version::JavaMinecraftVersion;
 
-/// Oldest client this rewrites for. Below 1.16.2 the join packet has no
-/// dimension codec at all and a different dimension field, and there is no
-/// generated registry data for those versions.
-pub const OLDEST_LAYOUT: JavaMinecraftVersion = JavaMinecraftVersion::V_1_16_2;
+/// Oldest login/respawn layout for which Pumpkin's packet writers expose the
+/// fields PJM tracks. Older schemas are validated and preserved as already
+/// versioned by Pumpkin; the generated registry rewrite starts at 1.16.2.
+pub const OLDEST_LAYOUT: JavaMinecraftVersion = JavaMinecraftVersion::V_1_14_4;
 
 /// First version whose registries travel in the configuration state instead,
 /// where `crate::registry::bundle_registry_packets` takes over.
@@ -75,6 +75,18 @@ fn rewrite_codec(version: JavaMinecraftVersion, codec: Nbt, out: &mut Vec<u8>) -
 pub fn rewrite_login(payload: &[u8], version: JavaMinecraftVersion) -> Option<Vec<u8>> {
     if version < OLDEST_LAYOUT || version >= FIRST_WITH_CONFIG_STATE {
         return None;
+    }
+    if version < JavaMinecraftVersion::V_1_16 {
+        validate_pre_1_16_login(payload, version)?;
+        return Some(payload.to_vec());
+    }
+    // Pumpkin's CLogin writer already emits the 1.16/1.16.1 schema for these
+    // clients, including the older combined hardcore/game-mode byte and named
+    // dimension string. There is no generated registry-codec rewrite for this
+    // tier, so validate and preserve its native bytes.
+    if version < JavaMinecraftVersion::V_1_16_2 {
+        validate_legacy_login(payload)?;
+        return Some(payload.to_vec());
     }
     let inline_dimension = version < FIRST_WITH_DIMENSION_NAME;
 
@@ -172,6 +184,15 @@ pub fn rewrite_respawn(payload: &[u8], version: JavaMinecraftVersion) -> Option<
     if version < OLDEST_LAYOUT || version >= FIRST_WITH_DIMENSION_NAME {
         return None;
     }
+    if version < JavaMinecraftVersion::V_1_16 {
+        validate_pre_1_16_respawn(payload, version)?;
+        return Some(payload.to_vec());
+    }
+    // Pumpkin writes the 1.16/1.16.1 string-dimension form directly.
+    if version < JavaMinecraftVersion::V_1_16_2 {
+        validate_legacy_respawn(payload)?;
+        return Some(payload.to_vec());
+    }
 
     let mut read: &[u8] = payload;
     take_named_nbt(&mut read)?;
@@ -203,18 +224,29 @@ pub fn login_world_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Opti
     if version < OLDEST_LAYOUT || version >= FIRST_WITH_CONFIG_STATE {
         return None;
     }
+    if version < JavaMinecraftVersion::V_1_16 {
+        let dimension_id = legacy_login_dimension_id(payload, version)?;
+        validate_pre_1_16_login(payload, version)?;
+        return world_bounds(legacy_dimension_name(dimension_id));
+    }
     let mut read: &[u8] = payload;
     read.get_i32_be().ok()?;
-    read.get_bool().ok()?;
-    read.get_u8().ok()?;
+    if version >= JavaMinecraftVersion::V_1_16_2 {
+        read.get_bool().ok()?;
+        read.get_u8().ok()?;
+    } else {
+        read.get_u8().ok()?; // Combined hardcore/game-mode byte.
+    }
     read.get_i8().ok()?;
     let world_count = usize::try_from(read.get_var_int().ok()?.0).ok()?;
     for _ in 0..world_count {
         read.get_str().ok()?;
     }
     take_named_nbt(&mut read)?;
-    if version < FIRST_WITH_DIMENSION_NAME {
+    if version >= JavaMinecraftVersion::V_1_16_2 && version < FIRST_WITH_DIMENSION_NAME {
         take_named_nbt(&mut read)?;
+    } else {
+        read.get_str().ok()?; // Dimension identifier.
     }
     world_bounds(&read.get_str().ok()?)
 }
@@ -226,9 +258,123 @@ pub fn respawn_world_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Op
     if version < OLDEST_LAYOUT || version >= FIRST_WITH_DIMENSION_NAME {
         return None;
     }
+    if version < JavaMinecraftVersion::V_1_16 {
+        let mut read: &[u8] = payload;
+        let dimension_id = read.get_i32_be().ok()?;
+        validate_pre_1_16_respawn(payload, version)?;
+        return world_bounds(legacy_dimension_name(dimension_id));
+    }
     let mut read: &[u8] = payload;
-    take_named_nbt(&mut read)?;
+    if version >= JavaMinecraftVersion::V_1_16_2 {
+        take_named_nbt(&mut read)?;
+    } else {
+        read.get_str().ok()?; // Dimension identifier.
+    }
     world_bounds(&read.get_str().ok()?)
+}
+
+fn validate_legacy_login(payload: &[u8]) -> Option<()> {
+    let mut read: &[u8] = payload;
+    read.get_i32_be().ok()?; // Entity id.
+    read.get_u8().ok()?; // Hardcore flag plus game mode.
+    read.get_i8().ok()?; // Previous game mode.
+    let world_count = usize::try_from(read.get_var_int().ok()?.0).ok()?;
+    if world_count > 1024 {
+        return None;
+    }
+    for _ in 0..world_count {
+        read.get_str().ok()?;
+    }
+    take_named_nbt(&mut read)?; // 1.16 dimension registry list.
+    read.get_str().ok()?; // Dimension identifier.
+    read.get_str().ok()?; // World name.
+    read.get_i64_be().ok()?; // Hashed seed.
+    read.get_u8().ok()?; // Max players.
+    read.get_var_int().ok()?; // View distance.
+    for _ in 0..4 {
+        read.get_bool().ok()?;
+    }
+    read.is_empty().then_some(())
+}
+
+fn legacy_login_dimension_id(payload: &[u8], version: JavaMinecraftVersion) -> Option<i32> {
+    let mut read: &[u8] = payload;
+    read.get_i32_be().ok()?; // Entity id.
+    read.get_u8().ok()?; // Hardcore flag plus game mode.
+    if version >= JavaMinecraftVersion::V_1_9_1 {
+        read.get_i32_be().ok()
+    } else {
+        read.get_i8().ok().map(i32::from)
+    }
+}
+
+fn legacy_dimension_name(dimension_id: i32) -> &'static str {
+    match dimension_id {
+        -1 => "minecraft:the_nether",
+        1 => "minecraft:the_end",
+        _ => "minecraft:overworld",
+    }
+}
+
+fn validate_pre_1_16_login(
+    payload: &[u8],
+    version: JavaMinecraftVersion,
+) -> Option<()> {
+    let mut read: &[u8] = payload;
+    read.get_i32_be().ok()?; // Entity id.
+    read.get_u8().ok()?; // Hardcore flag plus game mode.
+    if version >= JavaMinecraftVersion::V_1_9_1 {
+        read.get_i32_be().ok()?; // Dimension id.
+    } else {
+        read.get_i8().ok()?;
+    }
+    if version < JavaMinecraftVersion::V_1_14 {
+        read.get_u8().ok()?; // Difficulty.
+    }
+    if version >= JavaMinecraftVersion::V_1_15 {
+        read.get_i64_be().ok()?; // Hashed seed.
+    }
+    read.get_u8().ok()?; // Max players.
+    read.get_str().ok()?; // Level type.
+    if version >= JavaMinecraftVersion::V_1_14 {
+        read.get_var_int().ok()?; // View distance.
+    }
+    if version >= JavaMinecraftVersion::V_1_8 {
+        read.get_bool().ok()?; // Reduced debug info.
+    }
+    if version >= JavaMinecraftVersion::V_1_15 {
+        read.get_bool().ok()?; // Enable respawn screen.
+    }
+    read.is_empty().then_some(())
+}
+
+fn validate_pre_1_16_respawn(
+    payload: &[u8],
+    version: JavaMinecraftVersion,
+) -> Option<()> {
+    let mut read: &[u8] = payload;
+    read.get_i32_be().ok()?; // Dimension id.
+    if version >= JavaMinecraftVersion::V_1_15 {
+        read.get_i64_be().ok()?; // Hashed seed.
+    } else if version < JavaMinecraftVersion::V_1_14 {
+        read.get_u8().ok()?; // Difficulty.
+    }
+    read.get_u8().ok()?; // Game mode.
+    read.get_str().ok()?; // Level type.
+    read.is_empty().then_some(())
+}
+
+fn validate_legacy_respawn(payload: &[u8]) -> Option<()> {
+    let mut read: &[u8] = payload;
+    read.get_str().ok()?; // Dimension identifier.
+    read.get_str().ok()?; // World name.
+    read.get_i64_be().ok()?; // Hashed seed.
+    read.get_u8().ok()?; // Game mode.
+    read.get_i8().ok()?; // Previous game mode.
+    for _ in 0..3 {
+        read.get_bool().ok()?;
+    }
+    read.is_empty().then_some(())
 }
 
 fn world_bounds(name: &str) -> Option<(i32, i32)> {
@@ -351,6 +497,80 @@ mod tests {
         out
     }
 
+    fn legacy_login() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.write_i32_be(7).unwrap();
+        out.write_u8(0x08).unwrap(); // Hardcore plus survival.
+        out.write_i8(-1).unwrap();
+        out.write_var_int(&VarInt(1)).unwrap();
+        out.write_string("minecraft:overworld").unwrap();
+        put_named_nbt(&mut out, "", server_codec());
+        out.write_string("minecraft:overworld").unwrap(); // Dimension identifier.
+        out.write_string("minecraft:overworld").unwrap(); // World name.
+        out.write_i64_be(1234).unwrap();
+        out.write_u8(20).unwrap();
+        out.write_var_int(&VarInt(10)).unwrap();
+        for value in [false, true, false, false] {
+            out.write_bool(value).unwrap();
+        }
+        out
+    }
+
+    fn legacy_respawn() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.write_string("minecraft:overworld").unwrap(); // Dimension identifier.
+        out.write_string("minecraft:overworld").unwrap(); // World name.
+        out.write_i64_be(1234).unwrap();
+        out.write_u8(0).unwrap(); // Game mode.
+        out.write_i8(-1).unwrap(); // Previous game mode.
+        for value in [false, false, true] {
+            out.write_bool(value).unwrap();
+        }
+        out
+    }
+
+    fn pre_1_16_login(version: JavaMinecraftVersion) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.write_i32_be(7).unwrap();
+        out.write_u8(0x08).unwrap(); // Hardcore plus survival.
+        if version >= JavaMinecraftVersion::V_1_9_1 {
+            out.write_i32_be(-1).unwrap();
+        } else {
+            out.write_i8(-1).unwrap();
+        }
+        if version < JavaMinecraftVersion::V_1_14 {
+            out.write_u8(2).unwrap(); // Difficulty.
+        }
+        if version >= JavaMinecraftVersion::V_1_15 {
+            out.write_i64_be(1234).unwrap(); // Hashed seed.
+        }
+        out.write_u8(20).unwrap();
+        out.write_string("default").unwrap();
+        if version >= JavaMinecraftVersion::V_1_14 {
+            out.write_var_int(&VarInt(10)).unwrap(); // View distance.
+        }
+        if version >= JavaMinecraftVersion::V_1_8 {
+            out.write_bool(false).unwrap(); // Reduced debug info.
+        }
+        if version >= JavaMinecraftVersion::V_1_15 {
+            out.write_bool(true).unwrap(); // Enable respawn screen.
+        }
+        out
+    }
+
+    fn pre_1_16_respawn(version: JavaMinecraftVersion) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.write_i32_be(-1).unwrap(); // The Nether.
+        if version >= JavaMinecraftVersion::V_1_15 {
+            out.write_i64_be(1234).unwrap(); // Hashed seed.
+        } else if version < JavaMinecraftVersion::V_1_14 {
+            out.write_u8(2).unwrap(); // Difficulty.
+        }
+        out.write_u8(0).unwrap(); // Game mode.
+        out.write_string("default").unwrap();
+        out
+    }
+
     /// Reads back a rewritten join packet: the codec and, below 1.19, the
     /// inline dimension element.
     fn parse_login(payload: &[u8], version: JavaMinecraftVersion) -> (NbtCompound, Option<Nbt>) {
@@ -406,6 +626,88 @@ mod tests {
         JavaMinecraftVersion::V_1_19_4,
         JavaMinecraftVersion::V_1_20,
     ];
+
+    #[test]
+    fn native_1_16_login_is_validated_and_preserved() {
+        for version in [
+            JavaMinecraftVersion::V_1_16,
+            JavaMinecraftVersion::V_1_16_1,
+        ] {
+            let payload = legacy_login();
+            assert_eq!(rewrite_login(&payload, version).as_deref(), Some(payload.as_slice()));
+            assert_eq!(
+                login_world_bounds(&payload, version),
+                world_bounds("minecraft:overworld")
+            );
+
+            let mut malformed = payload.clone();
+            malformed.push(0);
+            assert!(rewrite_login(&malformed, version).is_none());
+        }
+    }
+
+    #[test]
+    fn native_1_16_respawn_is_validated_and_preserved() {
+        for version in [
+            JavaMinecraftVersion::V_1_16,
+            JavaMinecraftVersion::V_1_16_1,
+        ] {
+            let payload = legacy_respawn();
+            assert_eq!(
+                rewrite_respawn(&payload, version).as_deref(),
+                Some(payload.as_slice())
+            );
+            assert_eq!(
+                respawn_world_bounds(&payload, version),
+                world_bounds("minecraft:overworld")
+            );
+
+            let mut malformed = payload.clone();
+            malformed.push(0);
+            assert!(rewrite_respawn(&malformed, version).is_none());
+        }
+    }
+
+    #[test]
+    fn native_pre_1_16_login_is_validated_and_preserved() {
+        for version in [
+            JavaMinecraftVersion::V_1_14_4,
+            JavaMinecraftVersion::V_1_15_2,
+        ] {
+            let payload = pre_1_16_login(version);
+            assert_eq!(rewrite_login(&payload, version).as_deref(), Some(payload.as_slice()));
+            assert_eq!(
+                login_world_bounds(&payload, version),
+                world_bounds("minecraft:the_nether")
+            );
+
+            let mut malformed = payload.clone();
+            malformed.push(0);
+            assert!(rewrite_login(&malformed, version).is_none());
+        }
+    }
+
+    #[test]
+    fn native_pre_1_16_respawn_is_validated_and_preserved() {
+        for version in [
+            JavaMinecraftVersion::V_1_14_4,
+            JavaMinecraftVersion::V_1_15_2,
+        ] {
+            let payload = pre_1_16_respawn(version);
+            assert_eq!(
+                rewrite_respawn(&payload, version).as_deref(),
+                Some(payload.as_slice())
+            );
+            assert_eq!(
+                respawn_world_bounds(&payload, version),
+                world_bounds("minecraft:the_nether")
+            );
+
+            let mut malformed = payload.clone();
+            malformed.push(0);
+            assert!(rewrite_respawn(&malformed, version).is_none());
+        }
+    }
 
     #[test]
     fn every_tier_version_keeps_the_layout_and_replaces_the_codec() {

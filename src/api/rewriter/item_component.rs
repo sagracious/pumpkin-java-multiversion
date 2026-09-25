@@ -1,4 +1,5 @@
 use pumpkin_data::data_component::DataComponent;
+use pumpkin_nbt::tag::NbtTag;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkReadSliceExt, NetworkWriteExt, ReadingError};
 use pumpkin_util::version::JavaMinecraftVersion as V;
@@ -280,6 +281,7 @@ fn map_nested_ids(
     match component {
         C::Enchantments | C::StoredEnchantments => enchantment_ids(native, ids),
         C::AttributeModifiers => attribute_ids(native, ids),
+        C::MapDecorations if target < V::V_26_3 => map_decoration_types(native),
         C::Consumable | C::DeathProtection if target < V::V_26_3 => {
             consume_effect_payload(component, native, true, false)
         }
@@ -290,6 +292,48 @@ fn map_nested_ids(
         C::Container => nested_stacks(native, target, ids, true),
         _ => Ok(native.to_vec()),
     }
+}
+
+/// ViaBackwards downgrades the five 26.3-only map decoration types to the
+/// nearest 26.2 type. The item backup cache retains the original compound for
+/// a matching 26.2 item returned by the client.
+fn map_decoration_types(native: &[u8]) -> Result<Vec<u8>, ReadingError> {
+    const NEW_TYPES: [&str; 5] = [
+        "abandoned_camp",
+        "ancient_city",
+        "desert_pyramid",
+        "mineshaft",
+        "ocean_ruin_warm",
+    ];
+
+    let mut cursor = native;
+    let Some(NbtTag::Compound(mut decorations)) = cursor.get_nbt(&V::V_26_3)? else {
+        return Err(ReadingError::Message(
+            "map decorations component is not an NBT compound".into(),
+        ));
+    };
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "trailing bytes in map decorations component".into(),
+        ));
+    }
+
+    for value in decorations.child_tags.values_mut() {
+        let NbtTag::Compound(decoration) = value else {
+            continue;
+        };
+        let Some(NbtTag::String(decoration_type)) = decoration.child_tags.get_mut("type") else {
+            continue;
+        };
+        if NEW_TYPES.contains(&decoration_type.as_ref()) {
+            *decoration_type = "village_plains".into();
+        }
+    }
+
+    let mut out = Vec::with_capacity(native.len());
+    out.write_nbt_with_version(Some(&NbtTag::Compound(decorations)), &V::V_26_3)
+        .r()?;
+    Ok(out)
 }
 
 /// Enchantment ids the target has no row for take the whole entry with them.
@@ -406,9 +450,65 @@ fn map(mapping: &crate::api::IdMapping, id: i32) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::api::types::VAR_INT;
+    use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
+    use pumpkin_protocol::ser::NetworkWriteExt;
 
     fn ids() -> &'static ComposedMappings {
         crate::api::MappingData::get().composed(V::V_26_3)
+    }
+
+    #[test]
+    fn map_decoration_types_downgrade_without_changing_other_entry_data() {
+        const NEW_TYPES: [&str; 5] = [
+            "abandoned_camp",
+            "ancient_city",
+            "desert_pyramid",
+            "mineshaft",
+            "ocean_ruin_warm",
+        ];
+        let mut decorations = NbtCompound::new();
+        for (index, decoration_type) in NEW_TYPES.into_iter().enumerate() {
+            let mut entry = NbtCompound::new();
+            entry.put_string("type", decoration_type.to_owned());
+            entry.put_int("x", index as i32 - 2);
+            entry.put_int("z", 17 + index as i32);
+            entry.put_float("rotation", 1.25);
+            decorations.put(&format!("new_{index}"), NbtTag::Compound(entry));
+        }
+        let mut unchanged = NbtCompound::new();
+        unchanged.put_string("type", "village_desert".to_owned());
+        unchanged.put_int("x", 100);
+        decorations.put("existing", NbtTag::Compound(unchanged));
+
+        let native = NbtTag::Compound(decorations);
+        let mut payload = Vec::new();
+        payload
+            .write_nbt_with_version(Some(&native), &V::V_26_3)
+            .unwrap();
+        let downgraded = to_version(DataComponent::MapDecorations, &payload, V::V_26_2, ids())
+            .expect("26.2 has a map-decoration component");
+        let mut reader = downgraded.as_slice();
+        let Some(NbtTag::Compound(downgraded)) = reader.get_nbt(&V::V_26_3).unwrap() else {
+            panic!("downgraded map decorations remain a compound");
+        };
+        assert!(reader.is_empty());
+
+        for index in 0..NEW_TYPES.len() {
+            let entry = downgraded
+                .get(&format!("new_{index}"))
+                .and_then(NbtTag::extract_compound)
+                .expect("decoration entry");
+            assert_eq!(entry.get_string("type").as_deref(), Some("village_plains"));
+            assert_eq!(entry.get_int("x"), Some(index as i32 - 2));
+            assert_eq!(entry.get_int("z"), Some(17 + index as i32));
+            assert_eq!(entry.get_float("rotation"), Some(1.25));
+        }
+        let entry = downgraded
+            .get("existing")
+            .and_then(NbtTag::extract_compound)
+            .expect("existing decoration entry");
+        assert_eq!(entry.get_string("type").as_deref(), Some("village_desert"));
+        assert_eq!(entry.get_int("x"), Some(100));
     }
 
     /// `md('1.21.4')` ends `enchantments` with `showTooltip`; `md('1.21.5')`

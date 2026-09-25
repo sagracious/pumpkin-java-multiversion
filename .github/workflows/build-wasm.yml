@@ -45,6 +45,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: wasm32-wasip2
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+      - name: Check changed Rust formatting
+        working-directory: pumpkin-java-multiversion
+        run: >-
+          rustfmt --edition 2024 --check
+          src/api/connection.rs
+          src/api/rewriter/item_backup.rs
+          src/api/rewriter/item_component.rs
+          src/api/rewriter/item_shape.rs
+          src/api/wrapper.rs
+          src/lib.rs
+          src/pipeline/mod.rs
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pumpkin-java-multiversion -> target

@@ -68,12 +68,15 @@ pub fn map_item_data(
 ) -> Result<(), TranslateError> {
     wrapper.passthrough(&VAR_INT)?;
     wrapper.passthrough(&I8T)?;
-    if layout < FIRST_OPTIONAL_ICONS {
-        // The tracking flag, dropped in 1.17.
+    if layout >= JavaMinecraftVersion::V_1_9 && layout < FIRST_OPTIONAL_ICONS {
+        // The tracking-position flag, removed in 1.17.
         wrapper.passthrough(&BOOL)?;
+    }
+    if layout >= JavaMinecraftVersion::V_1_14 {
+        // The locked flag remains ahead of the optional icon list from 1.14.
         wrapper.passthrough(&BOOL)?;
-    } else {
-        wrapper.passthrough(&BOOL)?;
+    }
+    if layout >= FIRST_OPTIONAL_ICONS {
         if !wrapper.passthrough(&BOOL)? {
             wrapper.passthrough_all();
             return Ok(());
@@ -157,10 +160,12 @@ mod tests {
 
     fn map_payload(icon: i32, version: JavaMinecraftVersion) -> Vec<u8> {
         let mut payload = vec![7u8, 0];
-        if version < FIRST_OPTIONAL_ICONS {
-            payload.push(1);
+        if version >= JavaMinecraftVersion::V_1_9 && version < FIRST_OPTIONAL_ICONS {
+            payload.push(1); // Tracking position.
         }
-        payload.push(0);
+        if version >= JavaMinecraftVersion::V_1_14 {
+            payload.push(0); // Locked.
+        }
         if version >= FIRST_OPTIONAL_ICONS {
             payload.push(1);
         }
@@ -202,5 +207,41 @@ mod tests {
             run(map_item_data, &MAP_ITEM_DATA, &payload, version).unwrap(),
             payload
         );
+    }
+
+    fn empty_map_payload(version: JavaMinecraftVersion) -> Vec<u8> {
+        let mut payload = vec![7u8, 0];
+        if version >= JavaMinecraftVersion::V_1_9 && version < FIRST_OPTIONAL_ICONS {
+            payload.push(1); // Tracking position.
+        }
+        if version >= JavaMinecraftVersion::V_1_14 {
+            payload.push(0); // Locked.
+        }
+        if version >= FIRST_OPTIONAL_ICONS {
+            payload.push(0); // No optional icon list.
+        } else {
+            payload.push(0); // Empty icon list.
+        }
+        payload.push(0); // Empty patch.
+        payload
+    }
+
+    #[test]
+    fn map_flags_follow_each_version_introduction_boundary() {
+        for version in [
+            JavaMinecraftVersion::V_1_8,
+            JavaMinecraftVersion::V_1_12_2,
+            JavaMinecraftVersion::V_1_14_4,
+            JavaMinecraftVersion::V_1_16_2,
+            JavaMinecraftVersion::V_1_17,
+            JavaMinecraftVersion::V_1_21,
+        ] {
+            let payload = empty_map_payload(version);
+            assert_eq!(
+                run(map_item_data, &MAP_ITEM_DATA, &payload, version).unwrap(),
+                payload,
+                "{version}"
+            );
+        }
     }
 }

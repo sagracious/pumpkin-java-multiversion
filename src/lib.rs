@@ -19,7 +19,7 @@ use pumpkin_plugin_api::{
     register_plugin,
 };
 
-use crate::api::{bind_player, is_bound, remove_player};
+use crate::api::{bind_player, is_bound, remove_connection, remove_player};
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -110,8 +110,16 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                 &event.raw_payload,
             ) {
                 Some(translated) => {
-                    event.packet_id = translated.packet.v26_3;
-                    event.raw_payload = translated.payload;
+                    event
+                        .serverbound_packets
+                        .extend(translated.serverbound.into_iter().filter_map(
+                            |(packet, raw_payload)| {
+                                (packet.v26_3 >= 0).then_some(PacketTranslationOutput {
+                                    packet_id: packet.v26_3,
+                                    raw_payload,
+                                })
+                            },
+                        ));
                     event
                         .clientbound_packets
                         .extend(translated.replies.into_iter().filter_map(
@@ -123,6 +131,12 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                                 })
                             },
                         ));
+                    if translated.cancelled {
+                        event.cancelled = true;
+                    } else {
+                        event.packet_id = translated.packet.v26_3;
+                        event.raw_payload = translated.payload;
+                    }
                 }
                 None => event.cancelled = true,
             }
@@ -144,22 +158,35 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                 event.packet_id,
                 hex(&event.raw_payload)
             );
-            match pipeline::translate_clientbound(
+            let translated = pipeline::translate_clientbound(
                 key,
                 version,
                 state,
                 event.packet_id,
                 &event.raw_payload,
-            ) {
+            );
+            // Status probes never become Players, so release the transient
+            // translator state after each status response/pong.
+            if state == 1 {
+                remove_connection(key);
+            }
+            match translated {
                 Some(translated) => {
-                    let packet_id = translated.packet.to_id(version);
-                    if packet_id < 0 {
+                    if !translated.cancelled && translated.packet.to_id(version) < 0 {
                         event.cancelled = true;
                         return event;
                     }
                     event.translated = true;
-                    event.packet_id = packet_id;
-                    event.raw_payload = translated.payload;
+                    event
+                        .serverbound_packets
+                        .extend(translated.serverbound.into_iter().filter_map(
+                            |(packet, raw_payload)| {
+                                (packet.v26_3 >= 0).then_some(PacketTranslationOutput {
+                                    packet_id: packet.v26_3,
+                                    raw_payload,
+                                })
+                            },
+                        ));
                     event
                         .clientbound_packets
                         .extend(translated.extra.into_iter().filter_map(
@@ -171,6 +198,12 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                                 })
                             },
                         ));
+                    if translated.cancelled {
+                        event.cancelled = true;
+                    } else {
+                        event.packet_id = translated.packet.to_id(version);
+                        event.raw_payload = translated.payload;
+                    }
                 }
                 None => event.cancelled = true,
             }

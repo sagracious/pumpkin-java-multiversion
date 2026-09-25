@@ -1,9 +1,14 @@
 use std::any::{Any, TypeId};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use pumpkin_plugin_api::Player;
 use pumpkin_util::version::JavaMinecraftVersion;
+
+const PRE_PLAYER_CONNECTION_TTL: Duration = Duration::from_secs(300);
+const MAX_UNBOUND_CONNECTIONS: usize = 2_048;
+const PRUNE_EVERY_NEW_CONNECTIONS: usize = 32;
 
 #[derive(Default)]
 pub struct EntityTracker {
@@ -63,6 +68,7 @@ pub struct UserConnection {
     pub version: JavaMinecraftVersion,
     pub entity_tracker: EntityTracker,
     pub bound: bool,
+    last_used: Instant,
     storages: HashMap<TypeId, Box<dyn Any>>,
 }
 
@@ -74,6 +80,7 @@ impl UserConnection {
             version,
             entity_tracker: EntityTracker::default(),
             bound: false,
+            last_used: Instant::now(),
             storages: HashMap::new(),
         }
     }
@@ -99,6 +106,29 @@ impl UserConnection {
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<u64, UserConnection>> = RefCell::new(HashMap::new());
     static PLAYERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
+    static NEW_CONNECTIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn prune_unbound(connections: &mut HashMap<u64, UserConnection>, now: Instant) {
+    connections.retain(|_, connection| {
+        connection.bound || now.duration_since(connection.last_used) < PRE_PLAYER_CONNECTION_TTL
+    });
+
+    let mut unbound: Vec<_> = connections
+        .iter()
+        .filter(|(_, connection)| !connection.bound)
+        .map(|(id, connection)| (*id, connection.last_used))
+        .collect();
+    // This runs immediately before a new state entry is inserted.
+    let keep = MAX_UNBOUND_CONNECTIONS.saturating_sub(1);
+    if unbound.len() <= keep {
+        return;
+    }
+    let excess = unbound.len() - keep;
+    unbound.sort_unstable_by_key(|(_, created_at)| *created_at);
+    for (id, _) in unbound.into_iter().take(excess) {
+        connections.remove(&id);
+    }
 }
 
 /// The wasm host runs one instance per plugin and serialises calls into it.
@@ -108,9 +138,37 @@ pub fn with_connection<R>(
     f: impl FnOnce(&mut UserConnection) -> R,
 ) -> R {
     CONNECTIONS.with_borrow_mut(|connections| {
+        let now = Instant::now();
+        if connections.get(&key).is_some_and(|connection| {
+            !connection.bound
+                && now.duration_since(connection.last_used) >= PRE_PLAYER_CONNECTION_TTL
+        }) {
+            connections.remove(&key);
+        }
+        if !connections.contains_key(&key) {
+            let should_prune = NEW_CONNECTIONS.with(|counter| {
+                let next = counter.get() + 1;
+                counter.set(if next >= PRUNE_EVERY_NEW_CONNECTIONS {
+                    0
+                } else {
+                    next
+                });
+                next >= PRUNE_EVERY_NEW_CONNECTIONS
+            });
+            if should_prune
+                || connections
+                    .values()
+                    .filter(|connection| !connection.bound)
+                    .count()
+                    >= MAX_UNBOUND_CONNECTIONS
+            {
+                prune_unbound(connections, now);
+            }
+        }
         let connection = connections
             .entry(key)
             .or_insert_with(|| UserConnection::new(key, version));
+        connection.last_used = now;
         connection.version = version;
         f(connection)
     })
@@ -187,5 +245,35 @@ mod tests {
         with_connection(8, JavaMinecraftVersion::V_1_20, |_| {});
         assert!(!is_bound(8));
         remove_connection(8);
+    }
+
+    #[test]
+    fn pruning_removes_expired_and_excess_unbound_connections_only() {
+        let now = Instant::now();
+        let mut connections = HashMap::new();
+        let mut expired = UserConnection::new(1, JavaMinecraftVersion::V_1_20);
+        expired.last_used = now - PRE_PLAYER_CONNECTION_TTL - Duration::from_secs(1);
+        connections.insert(1, expired);
+
+        let mut active_player = UserConnection::new(2, JavaMinecraftVersion::V_1_20);
+        active_player.last_used = now - PRE_PLAYER_CONNECTION_TTL - Duration::from_secs(1);
+        active_player.bound = true;
+        connections.insert(2, active_player);
+
+        for id in 10..(10 + MAX_UNBOUND_CONNECTIONS as u64 + 1) {
+            let mut connection = UserConnection::new(id, JavaMinecraftVersion::V_1_20);
+            connection.last_used = now - Duration::from_secs(id - 9);
+            connections.insert(id, connection);
+        }
+
+        prune_unbound(&mut connections, now);
+        assert!(!connections.contains_key(&1), "expired login state is removed");
+        assert!(connections.contains_key(&2), "live player state is retained");
+        assert!(!connections.contains_key(&(9 + MAX_UNBOUND_CONNECTIONS as u64)));
+        assert!(!connections.contains_key(&(10 + MAX_UNBOUND_CONNECTIONS as u64)));
+        assert_eq!(
+            connections.values().filter(|connection| !connection.bound).count(),
+            MAX_UNBOUND_CONNECTIONS - 1
+        );
     }
 }

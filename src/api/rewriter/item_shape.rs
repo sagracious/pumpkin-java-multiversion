@@ -292,13 +292,12 @@ pub const fn shape(component: DataComponent) -> &'static Shape {
         | C::CatCollar
         | C::SheepColor
         | C::ShulkerColor => &STR,
-        C::CustomName | C::CustomData | C::BucketEntityData => &NBT,
+        C::CustomName | C::CustomData | C::BucketEntityData | C::MapDecorations => &NBT,
         C::Unbreakable
         | C::CreativeSlotLock
         | C::IntangibleProjectile
         | C::Glider
         | C::DebugStickState
-        | C::MapDecorations
         | C::Recipes
         | C::Lock
         | C::ContainerLoot => &UNIT,
