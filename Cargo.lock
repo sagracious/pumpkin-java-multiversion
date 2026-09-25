@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "pumpkin-java-multiversion"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "flate2",
  "crc-fast",

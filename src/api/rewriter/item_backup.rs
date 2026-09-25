@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crc_fast::{CrcAlgorithm::Crc32Iscsi, Digest};
 use pumpkin_data::data_component::DataComponent;
-use pumpkin_data::data_component_impl::DataComponentImpl;
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_protocol::{
     codec::data_component,
@@ -184,7 +183,7 @@ pub fn restore_full_item(
         return;
     };
 
-    let Some(client_item_id) = map(ids.items, *id) else {
+    let Some(client_item_id) = map(&ids.items, *id) else {
         return;
     };
     let custom_data_id = i32::from(DataComponent::CustomData.to_id());
