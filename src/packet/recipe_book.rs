@@ -57,6 +57,70 @@ pub fn rewrite_recipe_book_add(
     Ok(())
 }
 
+/// Rewrites the recipe groups and stonecutter displays from the 26.3 packet.
+/// Older clients have no recipe-display format, so the packet is discarded.
+pub fn rewrite_update_recipes(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let target = connection.version;
+    if target < V::V_1_21_2 {
+        wrapper.cancel();
+        return Ok(());
+    }
+    if ctx.layout != V::V_26_3 {
+        return Err(TranslateError::Unsupported("update recipes source layout"));
+    }
+
+    let mappings = MappingData::get().composed(target);
+    let groups = read_count(wrapper, MAX_RECIPE_ENTRIES, "recipe group count", true)?;
+    for _ in 0..groups {
+        wrapper.passthrough(&STRING)?; // Recipe group
+        let item_count = read_count(wrapper, MAX_RECIPE_LIST, "recipe group item count", true)?;
+        for _ in 0..item_count {
+            let item = wrapper.read(&VAR_INT)?.0;
+            write_var_int(wrapper, mapped_id_or_identity(&mappings.items, item))?;
+        }
+    }
+
+    let stonecutter_recipes = read_count(
+        wrapper,
+        MAX_RECIPE_ENTRIES,
+        "stonecutter recipe count",
+        true,
+    )?;
+    for _ in 0..stonecutter_recipes {
+        holder_set(wrapper, &mappings.items)?;
+        slot_display(wrapper, connection, target, mappings, true)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the recipe display shown when an older client opens a recipe.
+pub fn rewrite_place_ghost_recipe(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let target = connection.version;
+    if target < V::V_1_21_2 {
+        wrapper.cancel();
+        return Ok(());
+    }
+    if ctx.layout != V::V_26_3 {
+        return Err(TranslateError::Unsupported("ghost recipe source layout"));
+    }
+
+    wrapper.passthrough(&VAR_INT)?; // Container ID
+    recipe_display(
+        wrapper,
+        connection,
+        target,
+        MappingData::get().composed(target),
+    )
+}
+
 fn read_count(
     wrapper: &mut PacketWrapper,
     maximum: i32,
@@ -76,6 +140,11 @@ fn read_count(
 fn mapped_id(mapping: &IdMapping, id: i32) -> Option<i32> {
     let id = u32::try_from(id).ok()?;
     i32::try_from(mapping.map(id)?).ok()
+}
+
+/// Via's item registry rewriter preserves IDs with no mapping row.
+fn mapped_id_or_identity(mapping: &IdMapping, id: i32) -> i32 {
+    mapped_id(mapping, id).unwrap_or(id)
 }
 
 fn write_var_int(wrapper: &mut PacketWrapper, value: i32) -> Result<(), TranslateError> {
@@ -162,16 +231,12 @@ fn slot_display(
         }
         SLOT_DISPLAY_ITEM => {
             let source_item = wrapper.read(&VAR_INT)?.0;
-            let mapped_item = mapped_id(&mappings.items, source_item);
-            let display_type = if mapped_type.is_some_and(|id| id != 0) && mapped_item.is_some() {
-                mapped_type.unwrap()
-            } else {
-                0
-            };
+            let mapped_item = mapped_id_or_identity(&mappings.items, source_item);
+            let display_type = mapped_type.filter(|id| *id != 0).unwrap_or(0);
             if emit {
                 write_var_int(wrapper, display_type)?;
                 if display_type != 0 {
-                    write_var_int(wrapper, mapped_item.unwrap())?;
+                    write_var_int(wrapper, mapped_item)?;
                 }
             }
         }
@@ -334,8 +399,7 @@ fn crafting_requirements(
 }
 
 /// HolderSet uses selector 0 plus a tag string, or selector n+1 plus n ids.
-/// An item id absent from the target registry is filtered out, never copied as
-/// an accidental identity mapping.
+/// Direct item IDs use Via's identity fallback when there is no mapping row.
 fn holder_set(wrapper: &mut PacketWrapper, items: &IdMapping) -> Result<(), TranslateError> {
     let selector = wrapper.read(&VAR_INT)?.0;
     if selector == 0 {
@@ -348,15 +412,11 @@ fn holder_set(wrapper: &mut PacketWrapper, items: &IdMapping) -> Result<(), Tran
         return Err(TranslateError::Unsupported("recipe item holder set"));
     }
 
-    let mut mapped = Vec::new();
+    let mut mapped = Vec::with_capacity((selector - 1) as usize);
     for _ in 0..(selector - 1) {
         let id = wrapper.read(&VAR_INT)?.0;
-        if let Some(id) = mapped_id(items, id) {
-            mapped.push(id);
-        }
+        mapped.push(mapped_id_or_identity(items, id));
     }
-    let selector = i32::try_from(mapped.len() + 1)
-        .map_err(|_| TranslateError::Unsupported("recipe item holder set"))?;
     write_var_int(wrapper, selector)?;
     for id in mapped {
         write_var_int(wrapper, id)?;
@@ -603,11 +663,11 @@ mod tests {
     }
 
     #[test]
-    fn items_missing_from_the_target_become_empty_displays_and_holder_sets() {
+    fn item_ids_without_mapping_rows_follow_vias_identity_fallback() {
         let key = 0x2623_0004;
         let payload = recipe_payload(70_000);
         let translated = translate_clientbound(key, TARGET, PLAY, RECIPE_BOOK_ADD.v26_3, &payload)
-            .expect("an unmappable recipe item should not invalidate the packet");
+            .expect("an item without an explicit mapping should not invalidate the packet");
         let mut cursor = translated.payload.as_slice();
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(1));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(17));
@@ -621,22 +681,27 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 VAR_INT.read(&mut cursor).unwrap(),
-                VarInt(SLOT_DISPLAY_EMPTY)
+                VarInt(SLOT_DISPLAY_ITEM)
             );
+            assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(70_000));
         }
+        // The item-stack display becomes empty because the whole stack cannot
+        // be mapped by StructuredItemRewriter.
         assert_eq!(
             VAR_INT.read(&mut cursor).unwrap(),
             VarInt(SLOT_DISPLAY_EMPTY)
         );
         assert_eq!(
             VAR_INT.read(&mut cursor).unwrap(),
-            VarInt(SLOT_DISPLAY_EMPTY)
+            VarInt(SLOT_DISPLAY_ITEM)
         );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(70_000));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(0));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(3));
         assert!(BOOL.read(&mut cursor).unwrap());
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(2));
-        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(1)); // empty direct set
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(2)); // one direct ID
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(70_000));
         assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(0));
         assert_eq!(
             STRING.read(&mut cursor).unwrap().as_ref(),
@@ -654,6 +719,151 @@ mod tests {
         assert!(
             translate_clientbound(key, TARGET, PLAY, RECIPE_BOOK_ADD.v26_3, &payload,).is_none()
         );
+        remove_connection(key);
+    }
+
+    #[test]
+    fn update_recipes_rewrites_item_arrays_holders_and_stonecutter_displays() {
+        let key = 0x2623_0019;
+        let mappings = MappingData::get().composed(TARGET);
+        let (source_item, target_item) = mapped_source_item(mappings);
+        let unmapped_item = 70_000;
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(1)).unwrap(); // recipe groups
+        STRING
+            .write(&mut payload, &"minecraft:building_blocks".into())
+            .unwrap();
+        VAR_INT.write(&mut payload, &VarInt(2)).unwrap(); // item ID array
+        push_var_int(&mut payload, source_item);
+        push_var_int(&mut payload, unmapped_item);
+        VAR_INT.write(&mut payload, &VarInt(1)).unwrap(); // stonecutter recipes
+        VAR_INT.write(&mut payload, &VarInt(3)).unwrap(); // holder: two IDs
+        push_var_int(&mut payload, source_item);
+        push_var_int(&mut payload, unmapped_item);
+        push_item_display(&mut payload, source_item);
+
+        let translated = translate_clientbound(
+            key,
+            TARGET,
+            PLAY,
+            crate::packet::mappings::clientbound::play::UPDATE_RECIPES.v26_3,
+            &payload,
+        )
+        .expect("26.2 update-recipes payload should translate");
+        let mut cursor = translated.payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(1));
+        assert_eq!(
+            STRING.read(&mut cursor).unwrap().as_ref(),
+            "minecraft:building_blocks"
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(2));
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(unmapped_item));
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(1));
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(3));
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(unmapped_item));
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        assert!(cursor.is_empty());
+        remove_connection(key);
+    }
+
+    #[test]
+    fn place_ghost_recipe_rewrites_container_and_recipe_display() {
+        let key = 0x2623_0020;
+        let target = V::V_1_21_11;
+        let mappings = MappingData::get().composed(target);
+        let source_item = i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id);
+        let target_item = mapped_id(&mappings.items, source_item).unwrap();
+        let mut payload = Vec::new();
+        push_var_int(&mut payload, 9); // container ID
+        push_var_int(&mut payload, 3); // stonecutter display
+        for _ in 0..3 {
+            push_item_display(&mut payload, source_item);
+        }
+
+        let translated = translate_clientbound(
+            key,
+            target,
+            PLAY,
+            crate::packet::mappings::clientbound::play::PLACE_GHOST_RECIPE.v26_3,
+            &payload,
+        )
+        .expect("1.21.11 ghost-recipe payload should translate");
+        let mut cursor = translated.payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(9));
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap(), VarInt(3));
+        for _ in 0..3 {
+            assert_eq!(
+                VAR_INT.read(&mut cursor).unwrap().0,
+                mapped_id(&mappings.slot_displays, SLOT_DISPLAY_ITEM).unwrap()
+            );
+            assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, target_item);
+        }
+        assert!(cursor.is_empty());
+        remove_connection(key);
+    }
+
+    #[test]
+    fn update_and_ghost_recipe_packets_are_dropped_before_recipe_display_support() {
+        let key = 0x2623_0021;
+        let target = V::V_1_20_5;
+        assert!(
+            translate_clientbound(
+                key,
+                target,
+                PLAY,
+                crate::packet::mappings::clientbound::play::UPDATE_RECIPES.v26_3,
+                &[0],
+            )
+            .is_none()
+        );
+        assert!(
+            translate_clientbound(
+                key,
+                target,
+                PLAY,
+                crate::packet::mappings::clientbound::play::PLACE_GHOST_RECIPE.v26_3,
+                &[0],
+            )
+            .is_none()
+        );
+        remove_connection(key);
+    }
+
+    #[test]
+    fn update_and_ghost_recipe_handlers_reject_non_26_3_source_layouts() {
+        let key = 0x2623_0022;
+        let ctx = Ctx {
+            step: crate::api::Step {
+                from: V::V_26_3,
+                to: V::V_26_2,
+            },
+            mappings: MappingData::get().step(V::V_26_3),
+            layout: V::V_26_2,
+        };
+        let mut connection = UserConnection::new(key, TARGET);
+        let mut update_wrapper = PacketWrapper::new(
+            &crate::packet::mappings::clientbound::play::UPDATE_RECIPES,
+            &[],
+        );
+        assert!(matches!(
+            rewrite_update_recipes(&mut update_wrapper, &mut connection, &ctx),
+            Err(TranslateError::Unsupported("update recipes source layout"))
+        ));
+
+        let mut ghost_wrapper = PacketWrapper::new(
+            &crate::packet::mappings::clientbound::play::PLACE_GHOST_RECIPE,
+            &[],
+        );
+        assert!(matches!(
+            rewrite_place_ghost_recipe(&mut ghost_wrapper, &mut connection, &ctx),
+            Err(TranslateError::Unsupported("ghost recipe source layout"))
+        ));
         remove_connection(key);
     }
 

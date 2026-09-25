@@ -22,6 +22,14 @@ impl Protocol for Protocol26_3To26_2 {
             &clientbound::play::RECIPE_BOOK_ADD,
             recipe_book::rewrite_recipe_book_add,
         );
+        reg.clientbound_layout(
+            &clientbound::play::UPDATE_RECIPES,
+            recipe_book::rewrite_update_recipes,
+        );
+        reg.clientbound_layout(
+            &clientbound::play::PLACE_GHOST_RECIPE,
+            recipe_book::rewrite_place_ghost_recipe,
+        );
         reg.serverbound(&serverbound::play::SWING, punch);
     }
 }
