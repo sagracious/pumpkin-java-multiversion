@@ -675,8 +675,16 @@ mod tests {
         assert_eq!(id, target_item);
         assert_eq!(count, 3);
         assert!(
-            added.is_empty(),
+            !added.iter().any(|component| {
+                component.id == i32::from(DataComponent::AttackAnimation.to_id())
+            }),
             "26.2-only attack animation is not sent to 1.21.11"
+        );
+        assert!(
+            added
+                .iter()
+                .any(|component| component.id == i32::from(DataComponent::CustomData.to_id())),
+            "a CustomData marker preserves the inconvertible component for resync"
         );
         assert_eq!(
             VAR_INT.read(&mut cursor).unwrap().0,
@@ -698,6 +706,7 @@ mod tests {
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
+        assert!(BOOL.read(&mut cursor).unwrap(), "replace flag is preserved");
         assert!(cursor.is_empty());
         remove_connection(key);
     }
@@ -757,6 +766,7 @@ mod tests {
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
+        assert!(BOOL.read(&mut cursor).unwrap(), "replace flag is preserved");
         assert!(cursor.is_empty());
         remove_connection(key);
     }

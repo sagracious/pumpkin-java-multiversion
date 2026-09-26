@@ -958,8 +958,7 @@ mod tests {
         );
         assert_eq!(STRING.read(&mut recipes).unwrap().as_ref(), "000000");
         assert_eq!(STRING.read(&mut recipes).unwrap().as_ref(), "");
-        assert_eq!(VAR_INT.read(&mut recipes).unwrap().0, 1); // One ingredient.
-        assert_eq!(VAR_INT.read(&mut recipes).unwrap().0, 1); // One alternative.
+        assert_eq!(VAR_INT.read(&mut recipes).unwrap().0, 1); // One stonecutter alternative.
         let _input = ItemT::for_version(target).read(&mut recipes).unwrap();
         let _result = ItemT::for_version(target).read(&mut recipes).unwrap();
         assert!(recipes.is_empty());
@@ -1067,8 +1066,7 @@ mod tests {
                     assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 0); // Category.
                 }
             }
-            assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 1); // One ingredient slot.
-            assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 0); // No alternatives.
+            assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 0); // Empty shaped slot.
             let _result = ItemT::for_version(target).read(&mut cursor).unwrap();
             if target >= V::V_1_19_4 {
                 assert!(!BOOL.read(&mut cursor).unwrap()); // Show notification.

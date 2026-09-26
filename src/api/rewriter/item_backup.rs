@@ -1154,11 +1154,11 @@ mod tests {
             DataComponent::AttackAnimation,
             vec![1, 6]
         )));
-        let custom_data = added
-            .iter()
-            .find(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
-            .and_then(|component| read_custom_data(&component.data))
-            .expect("custom data remains after removing the marker");
-        assert!(!custom_data.child_tags.contains_key(BACKUP_KEY));
+        assert!(
+            !added
+                .iter()
+                .any(|component| component.id == i32::from(DataComponent::CustomData.to_id())),
+            "synthetic CustomData is removed when the source stack had none"
+        );
     }
 }

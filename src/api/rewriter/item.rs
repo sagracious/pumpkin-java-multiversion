@@ -286,7 +286,12 @@ fn read_client_payload(
     }
     match component {
         C::Trim | C::Instrument | C::ProvidesTrimMaterial => {
-            item_component::legacy_registry_component_to_native(component, r, version)
+            item_component::legacy_registry_component_to_native(
+                component,
+                r,
+                version,
+                length_prefixed,
+            )
         }
         C::CustomModelData => {
             let value = r.get_var_int()?.0;
@@ -1114,6 +1119,7 @@ mod tests {
             )
             .unwrap();
         VAR_INT.write(&mut bytes, &VarInt(1)).unwrap(); // added component count
+        VAR_INT.write(&mut bytes, &VarInt(0)).unwrap(); // removed component count
         VAR_INT.write(&mut bytes, &VarInt(component_id)).unwrap();
         let mut custom_model_data = Vec::new();
         VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // floats
@@ -1125,7 +1131,6 @@ mod tests {
         VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // colors
         custom_model_data.write_i32_be(0x1234_5678).unwrap();
         bytes.extend(custom_model_data.clone());
-        VAR_INT.write(&mut bytes, &VarInt(0)).unwrap(); // removed component count
 
         let mut read = bytes.as_slice();
         let item = read_client_item(&mut read, source, false, mappings).unwrap();

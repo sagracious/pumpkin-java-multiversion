@@ -312,14 +312,11 @@ mod tests {
 
         let version = JavaMinecraftVersion::V_1_20_5;
         let breach = u16::from(Enchantment::from_name("breach").unwrap().id);
-        assert!(
-            crate::api::MappingData::get()
-                .composed(version)
-                .enchantments
-                .map(u32::from(breach))
-                .is_none(),
-            "breach is absent from 1.20.5"
-        );
+        let mapped_breach = crate::api::MappingData::get()
+            .composed(version)
+            .enchantments
+            .map(u32::from(breach))
+            .expect("Via's fallback maps breach to a target enchantment");
 
         let mut payload = Vec::new();
         payload.write_var_int(&VarInt(1)).unwrap();
@@ -333,6 +330,9 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].registry, "minecraft:enchantment");
         assert_eq!(groups[0].tags.len(), 1);
-        assert!(groups[0].tags[0].ids.is_empty());
+        assert_eq!(
+            groups[0].tags[0].ids,
+            [i32::try_from(mapped_breach).unwrap()]
+        );
     }
 }

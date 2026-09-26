@@ -406,7 +406,7 @@ mod tests {
                     version,
                     PLAY,
                     clientbound::play::RECIPE_BOOK_ADD.v26_3,
-                    &[0],
+                    &[0, 0], // empty entries, replace=false
                 )
                 .is_some(),
                 "{version}"
@@ -418,7 +418,7 @@ mod tests {
                 JavaMinecraftVersion::V_1_16_2,
                 PLAY,
                 clientbound::play::RECIPE_BOOK_ADD.v26_3,
-                &[0],
+                &[0, 0], // empty recipe entries, replace=false
             )
             .is_none()
         );

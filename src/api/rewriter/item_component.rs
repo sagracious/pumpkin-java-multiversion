@@ -457,6 +457,7 @@ pub(crate) fn legacy_registry_component_to_native(
     component: DataComponent,
     payload: &mut &[u8],
     version: V,
+    payload_is_bounded: bool,
 ) -> Result<Option<Vec<u8>>, ReadingError> {
     use DataComponent as C;
     let registries: &[&str] = match component {
@@ -514,7 +515,9 @@ pub(crate) fn legacy_registry_component_to_native(
     if component == C::Trim && version <= V::V_1_21_4 {
         payload.get_bool()?;
     }
-    if !payload.is_empty() {
+    // Unprefixed component payloads share the remainder of the item packet;
+    // only a length-delimited entry can be required to end here.
+    if payload_is_bounded && !payload.is_empty() {
         return Err(ReadingError::Message(format!(
             "trailing bytes in component {}: {}",
             i32::from(component.to_id()),
@@ -905,6 +908,7 @@ mod tests {
                 DataComponent::Instrument,
                 &mut instrument_payload,
                 target,
+                true,
             )
             .unwrap(),
             Some(native_instrument)
@@ -939,6 +943,7 @@ mod tests {
                 DataComponent::ProvidesTrimMaterial,
                 &mut material_payload,
                 target,
+                true,
             )
             .unwrap(),
             Some(native_material)
@@ -970,8 +975,13 @@ mod tests {
         assert!(read.is_empty());
         let mut trim_payload = legacy_trim.as_slice();
         assert_eq!(
-            legacy_registry_component_to_native(DataComponent::Trim, &mut trim_payload, target,)
-                .unwrap(),
+            legacy_registry_component_to_native(
+                DataComponent::Trim,
+                &mut trim_payload,
+                target,
+                true,
+            )
+            .unwrap(),
             Some(native_trim)
         );
 
@@ -996,6 +1006,7 @@ mod tests {
                 DataComponent::Instrument,
                 &mut instrument_payload,
                 target,
+                true,
             )
             .unwrap(),
             Some(native_instrument)
@@ -1019,6 +1030,7 @@ mod tests {
                 DataComponent::Instrument,
                 &mut string_payload,
                 target,
+                true,
             )
             .unwrap(),
             Some(native_instrument)

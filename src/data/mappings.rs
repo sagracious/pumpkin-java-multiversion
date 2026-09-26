@@ -457,9 +457,56 @@ impl MappingData {
             for step in &STEPS[..length] {
                 composed = composed.compose(self.step(step.from));
             }
+            if let Some(enchantments) = enchantment_mapping(target) {
+                composed.enchantments = enchantments;
+            }
             composed
         })
     }
+
+    /// Composes only the vendored Via step tables. `composed` applies the
+    /// generated-registry enchantment correction after this baseline chain.
+    fn compose_steps(&self, target: JavaMinecraftVersion) -> ComposedMappings {
+        let length = STEPS
+            .iter()
+            .filter(|step| step.to.protocol_version() >= target.protocol_version())
+            .count();
+        let mut composed = ComposedMappings::identity();
+        for step in &STEPS[..length] {
+            composed = composed.compose(self.step(step.from));
+        }
+        composed
+    }
+}
+
+/// Builds the server-to-client enchantment id table from generated registries
+/// for versions where enchantments are synced registries. Older clients use
+/// static enchantment ids; their mappings remain the Via step-table result.
+fn enchantment_mapping(target: JavaMinecraftVersion) -> Option<IdMapping> {
+    if target == V_26_3 {
+        return Some(IdMapping::IDENTITY);
+    }
+
+    let source = pumpkin_data::registry::REGISTRY_V_26_3
+        .iter()
+        .find(|registry| registry.registry_id == "enchantment")?;
+    let target = crate::registry::generated::get_synced(target)?
+        .iter()
+        .find(|registry| registry.registry_id == "enchantment")?;
+
+    let table = source
+        .entries
+        .iter()
+        .map(|source_entry| {
+            target
+                .entries
+                .iter()
+                .position(|entry| entry.name == source_entry.name)
+                .and_then(|id| i32::try_from(id).ok())
+                .unwrap_or(-1)
+        })
+        .collect();
+    Some(IdMapping(Repr::Table(table)))
 }
 
 /// The vendored files are plain named NBT; Via ships them gzipped.
@@ -759,9 +806,112 @@ mod tests {
     #[test]
     fn every_composed_table_matches_the_snapshot() {
         for (version, snapshot) in SNAPSHOT {
-            let hash = hash_version(MappingData::get().composed(*version));
+            let hash = hash_version(&MappingData::get().compose_steps(*version));
             assert_eq!(hash, *snapshot, "{version:?}");
         }
+    }
+
+    #[test]
+    fn composed_enchantment_ids_follow_the_target_registry() {
+        fn registry_names(version: JavaMinecraftVersion) -> Vec<&'static str> {
+            if version >= JavaMinecraftVersion::V_26_3 {
+                pumpkin_data::registry::REGISTRY_V_26_3
+                    .iter()
+                    .find(|registry| registry.registry_id == "enchantment")
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name)
+                    .collect()
+            } else {
+                crate::registry::generated::get_synced(version)
+                    .unwrap()
+                    .iter()
+                    .find(|registry| registry.registry_id == "enchantment")
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name)
+                    .collect()
+            }
+        }
+
+        let source = registry_names(JavaMinecraftVersion::V_26_3);
+        let source_id = |name: &str| source.iter().position(|entry| *entry == name).unwrap() as u32;
+        let target_id = |version, name: &str| {
+            registry_names(version)
+                .iter()
+                .position(|entry| *entry == name)
+                .map(|id| id as u32)
+        };
+
+        for version in [
+            JavaMinecraftVersion::V_1_21,
+            JavaMinecraftVersion::V_1_21_11,
+            JavaMinecraftVersion::V_26_2,
+        ] {
+            let map = &MappingData::get().composed(version).enchantments;
+            for name in ["breach", "density", "wind_burst", "lunge"] {
+                assert_eq!(
+                    map.map(source_id(name)),
+                    target_id(version, name),
+                    "{name} at {version:?}"
+                );
+            }
+        }
+
+        // Before 1.21 the client has a static enchantment registry and Via's
+        // step tables are the authoritative id mapping, including identity
+        // fallbacks where Via supplies no row.
+        let older = JavaMinecraftVersion::V_1_20_5;
+        let raw = MappingData::get().compose_steps(older);
+        let composed = MappingData::get().composed(older);
+        for id in 0..source.len() as u32 {
+            assert_eq!(
+                composed.enchantments.map(id),
+                raw.enchantments.map(id),
+                "static enchantment id {id} at {older:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn via_1_21_enchantment_asset_matches_the_generated_registry_names() {
+        use pumpkin_nbt::tag::NbtTag;
+        use std::collections::BTreeSet;
+
+        let via = super::read_root(include_bytes!(
+            "../../assets/viaversion/data/enchantments-1.21.nbt"
+        ));
+        let via_names = via
+            .get_list("entries")
+            .expect("ViaVersion enchantment entries")
+            .iter()
+            .map(|tag| {
+                let NbtTag::Compound(entry) = tag else {
+                    panic!("ViaVersion enchantment entry is a compound");
+                };
+                let translation = entry
+                    .get_compound("description")
+                    .and_then(|description| description.get_string("translate"))
+                    .expect("ViaVersion enchantment description key");
+                translation
+                    .strip_prefix("enchantment.minecraft.")
+                    .expect("namespaced ViaVersion enchantment translation")
+                    .to_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        let generated_names = crate::registry::generated::get_synced(JavaMinecraftVersion::V_1_21)
+            .expect("1.21 generated registry")
+            .iter()
+            .find(|registry| registry.registry_id == "enchantment")
+            .expect("1.21 enchantment registry")
+            .entries
+            .iter()
+            .map(|entry| entry.name)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(via_names, generated_names);
     }
 
     #[test]
