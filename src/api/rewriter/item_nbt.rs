@@ -1799,7 +1799,7 @@ mod tests {
 
         let added = nbt_to_components(&nbt, V::V_1_16_2);
         let back = components_to_nbt(&added, V::V_1_16_2, ids()).unwrap();
-        assert_eq!(back.get_int("HideFlags"), Some(63));
+        assert_eq!(back.get("HideFlags").and_then(extract_int_like), Some(63));
         assert_eq!(back.get_int("Damage"), Some(3));
     }
 
@@ -1844,7 +1844,7 @@ mod tests {
         assert!(hidden.contains(&i32::from(DataComponent::CanBreak.to_id())));
 
         let back = components_to_nbt(&components, V::V_1_16_2, ids()).unwrap();
-        assert_eq!(back.get_int("HideFlags"), Some(63));
+        assert_eq!(back.get("HideFlags").and_then(extract_int_like), Some(63));
         assert_eq!(
             back.get_list("CanPlaceOn").unwrap()[0].extract_string(),
             Some("minecraft:stone[axis=y]")

@@ -590,23 +590,44 @@ pub(crate) fn legacy_jukebox_playable_to_native(
 
 pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Option<&'static str> {
     let id = usize::try_from(id).ok()?;
+    let namespaced_registry_id = format!(
+        "minecraft:{}",
+        registry_id
+            .strip_prefix("minecraft:")
+            .unwrap_or(registry_id)
+    );
     if version >= V::V_26_3 {
         let registry = pumpkin_data::registry::REGISTRY_V_26_3
             .iter()
-            .find(|registry| registry.registry_id == registry_id)?;
+            .find(|registry| {
+                registry.registry_id == registry_id
+                    || registry.registry_id == namespaced_registry_id.as_str()
+            })?;
         return Some(registry.entries.get(id)?.name);
     }
     let registry = crate::registry::generated::get_synced(version)?
         .iter()
-        .find(|registry| registry.registry_id == registry_id)?;
+        .find(|registry| {
+            registry.registry_id == registry_id
+                || registry.registry_id == namespaced_registry_id.as_str()
+        })?;
     Some(registry.entries.get(id)?.name)
 }
 
 pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Option<i32> {
+    let namespaced_registry_id = format!(
+        "minecraft:{}",
+        registry_id
+            .strip_prefix("minecraft:")
+            .unwrap_or(registry_id)
+    );
     let index = if version >= V::V_26_3 {
         let registry = pumpkin_data::registry::REGISTRY_V_26_3
             .iter()
-            .find(|registry| registry.registry_id == registry_id)?;
+            .find(|registry| {
+                registry.registry_id == registry_id
+                    || registry.registry_id == namespaced_registry_id.as_str()
+            })?;
         registry
             .entries
             .iter()
@@ -614,7 +635,10 @@ pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Op
     } else {
         let registry = crate::registry::generated::get_synced(version)?
             .iter()
-            .find(|registry| registry.registry_id == registry_id)?;
+            .find(|registry| {
+                registry.registry_id == registry_id
+                    || registry.registry_id == namespaced_registry_id.as_str()
+            })?;
         registry
             .entries
             .iter()
