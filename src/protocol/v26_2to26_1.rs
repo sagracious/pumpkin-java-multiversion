@@ -254,13 +254,13 @@ fn bed_block_entity_type_id(version: V) -> Option<i32> {
 fn bed_states_by_version() -> &'static [(V, HashSet<u32>)] {
     static STATES: OnceLock<Vec<(V, HashSet<u32>)>> = OnceLock::new();
     STATES.get_or_init(|| {
-        let source = MappingData::get().composed(V::V_26_2).blockstates;
+        let source = &MappingData::get().composed(V::V_26_2).blockstates;
         let source_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
         crate::protocol::VERSIONS
             .iter()
             .copied()
             .map(|version| {
-                let target = MappingData::get().composed(version).blockstates;
+                let target = &MappingData::get().composed(version).blockstates;
                 let mut states = HashSet::new();
                 for source_state in 0..source_len {
                     if source
@@ -435,7 +435,7 @@ mod tests {
     }
 
     fn bed_state_for(version: V) -> i32 {
-        let source = MappingData::get().composed(V::V_26_2).blockstates;
+        let source = &MappingData::get().composed(V::V_26_2).blockstates;
         let source_26_3 = (0..u32::try_from(source.len()).unwrap())
             .find(|state| source.map(*state).is_some_and(|mapped| mapped == 1931))
             .expect("26.2 bed state has a 26.3 mapping");
