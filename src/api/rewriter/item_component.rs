@@ -593,7 +593,7 @@ pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Opt
         let block_id = pumpkin_data::BlockId::new(u16::try_from(id).ok()?)?;
         return Some(pumpkin_data::Block::from_id(block_id).name);
     }
-    if registry_id == "mob_effect" && (version < V::V_1_20_5 || version >= V::V_26_3) {
+    if registry_id == "mob_effect" {
         use pumpkin_data::data_component_impl::IDSetContent;
 
         let effect = pumpkin_data::effect::StatusEffect::from_id(u16::try_from(id).ok()?)?;
@@ -634,7 +634,7 @@ pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Op
     if registry_id == "block" && version >= V::V_26_3 {
         return i32::try_from(pumpkin_data::Block::from_name(name)?.id.as_u16()).ok();
     }
-    if registry_id == "mob_effect" && (version < V::V_1_20_5 || version >= V::V_26_3) {
+    if registry_id == "mob_effect" {
         return Some(i32::from(status_effect_from_name(name)?.id));
     }
     let namespaced_registry_id = format!(
@@ -1287,7 +1287,7 @@ mod tests {
 
     #[test]
     fn trim_instrument_and_material_holder_ids_map_by_registry_name() {
-        let target = V::V_1_20_5;
+        let target = V::V_1_21_2;
         let ids = crate::api::MappingData::get().composed(target);
         let mut native = Vec::new();
         VAR_INT

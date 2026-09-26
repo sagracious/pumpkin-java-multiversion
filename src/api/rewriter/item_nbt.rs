@@ -1302,16 +1302,13 @@ fn legacy_block_predicates_from_nbt(list: &[NbtTag]) -> Option<Vec<u8>> {
             (block, state.strip_suffix(']'))
         });
         let is_tag = block.starts_with('#');
-        let bare = block
-            .strip_prefix('#')
-            .unwrap_or(block)
-            .strip_prefix("minecraft:")
-            .unwrap_or_else(|| block.strip_prefix('#').unwrap_or(block));
+        let identifier = block.strip_prefix('#').unwrap_or(block);
+        let bare = identifier.strip_prefix("minecraft:").unwrap_or(identifier);
         let mut predicate = Vec::new();
         predicate.write_bool(true).ok()?; // Holder set is present.
         if is_tag {
             predicate.write_var_int(&VarInt(0)).ok()?;
-            predicate.write_string(bare).ok()?;
+            predicate.write_string(identifier).ok()?;
         } else {
             let id = registry_entry_id(V::V_26_3, "block", bare)?;
             predicate.write_var_int(&VarInt(2)).ok()?; // One explicit block id.
