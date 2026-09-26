@@ -143,7 +143,8 @@ impl StructuredItemRewriter {
         match item {
             Item::Empty => Item::Empty,
             Item::Nbt { id, count, nbt } => {
-                let Some(mapped_id) = map(ids.items_inverse(), *id) else {
+                let client_item_id = *id;
+                let Some(mapped_id) = map(ids.items_inverse(), client_item_id) else {
                     return Item::Empty;
                 };
                 let added = match nbt {
@@ -152,7 +153,8 @@ impl StructuredItemRewriter {
                     }
                     _ => Vec::new(),
                 };
-                let id = restore_backported_item_id(mapped_id, &added, ids).unwrap_or(mapped_id);
+                let id =
+                    restore_backported_item_id(client_item_id, &added, ids).unwrap_or(mapped_id);
                 Item::Structured {
                     count: i32::from(*count),
                     id,
@@ -166,7 +168,8 @@ impl StructuredItemRewriter {
                 added,
                 removed,
             } => {
-                let Some(mapped_id) = map(ids.items_inverse(), *id) else {
+                let client_item_id = *id;
+                let Some(mapped_id) = map(ids.items_inverse(), client_item_id) else {
                     return Item::Empty;
                 };
                 let component_ids = ids.data_component_type_inverse();
@@ -179,7 +182,8 @@ impl StructuredItemRewriter {
                         })
                     })
                     .collect();
-                let id = restore_backported_item_id(mapped_id, &added, ids).unwrap_or(mapped_id);
+                let id =
+                    restore_backported_item_id(client_item_id, &added, ids).unwrap_or(mapped_id);
                 Item::Structured {
                     count: *count,
                     id,
@@ -195,7 +199,7 @@ impl StructuredItemRewriter {
 }
 
 fn restore_backported_item_id(
-    mapped_item_id: i32,
+    client_item_id: i32,
     components: &[ItemComponent],
     ids: &ComposedMappings,
 ) -> Option<i32> {
@@ -203,9 +207,9 @@ fn restore_backported_item_id(
         .iter()
         .find(|component| component.id == i32::from(DataComponent::CustomModelData.to_id()))
         .and_then(|component| item_nbt::legacy_custom_model_data(&component.data))?;
-    let mapped_item_id = u32::try_from(mapped_item_id).ok()?;
+    let client_item_id = u32::try_from(client_item_id).ok()?;
     ids.custom_model_data.iter().find_map(|(source_id, value)| {
-        (*value == model && ids.items.map(*source_id) == Some(mapped_item_id))
+        (*value == model && ids.items.map(*source_id) == Some(client_item_id))
             .then(|| i32::try_from(*source_id).ok())
             .flatten()
     })
