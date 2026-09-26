@@ -819,7 +819,9 @@ fn write_var_int_to(payload: &mut Vec<u8>, value: i32) -> Result<(), TranslateEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::mappings::clientbound::play::{RECIPE_BOOK_REMOVE, RECIPE_BOOK_SETTINGS};
+    use crate::packet::mappings::clientbound::play::{
+        RECIPE_BOOK_REMOVE, RECIPE_BOOK_SETTINGS as RECIPE_BOOK_SETTINGS_PACKET,
+    };
     use crate::packet::mappings::serverbound::play::{PLACE_RECIPE, RECIPE_BOOK_SEEN_RECIPE};
 
     fn settings_payload(settings: [bool; RECIPE_BOOK_SETTINGS]) -> Vec<u8> {
@@ -974,7 +976,8 @@ mod tests {
         let target = V::V_1_16_2;
         let mut connection = UserConnection::new(0x7a11, target);
         let settings = [true, false, false, true, true, true, false, false];
-        let mut wrapper = PacketWrapper::new(&RECIPE_BOOK_SETTINGS, &settings_payload(settings));
+        let mut wrapper =
+            PacketWrapper::new(&RECIPE_BOOK_SETTINGS_PACKET, &settings_payload(settings));
         rewrite_recipe_book_settings(&mut wrapper, &mut connection, V::V_26_3).unwrap();
         assert!(wrapper.finish_with_outputs().unwrap().cancelled);
 
@@ -994,7 +997,7 @@ mod tests {
 
     #[test]
     fn old_recipe_clicks_return_the_synthetic_display_id_to_26_3() {
-        let target = V::V_1_21_1;
+        let target = V::V_1_21;
         let mut connection = UserConnection::new(0x7a12, target);
         let mut payload = Vec::new();
         I8.write(&mut payload, &5).unwrap();

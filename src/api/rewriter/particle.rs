@@ -1319,7 +1319,7 @@ mod tests {
         let origin = ((1i64 & 0x3ff_ffff) << 38) | ((3i64 & 0x3ff_ffff) << 12) | (2i64 & 0xfff);
         assert_eq!(I64T.read(&mut translated).unwrap(), origin);
         assert_eq!(
-            STRING.read(&mut translated).unwrap().as_str(),
+            STRING.read(&mut translated).unwrap().as_ref(),
             "minecraft:block"
         );
         assert_eq!(I64T.read(&mut translated).unwrap(), destination);

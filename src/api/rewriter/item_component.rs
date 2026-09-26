@@ -516,7 +516,8 @@ pub(crate) fn legacy_registry_component_to_native(
     }
     if !payload.is_empty() {
         return Err(ReadingError::Message(format!(
-            "trailing bytes in {component:?} component: {}",
+            "trailing bytes in component {}: {}",
+            i32::from(component.to_id()),
             payload.len()
         )));
     }
@@ -558,7 +559,7 @@ fn skip_inline_registry_value(
         ));
     }
     for _ in 0..count {
-        if version <= V::V_1_21_1 {
+        if version <= V::V_1_21 {
             payload.get_var_int()?; // numeric armor-material id
         } else {
             payload.get_str()?;
