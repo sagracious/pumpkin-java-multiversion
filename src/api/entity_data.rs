@@ -296,15 +296,11 @@ mod tests {
     fn a_truncated_legacy_rotation_does_not_become_a_boolean_entry() {
         let mut payload = vec![9, 8];
         payload.extend([0u8; 11]);
-        payload.push(TERMINATOR);
         let mut read: &[u8] = &payload;
-        let entries = EntityDataListT::for_version(V::V_1_15_2)
-            .read(&mut read)
-            .unwrap();
-        assert!(entries.is_empty());
         assert!(
-            read.is_empty(),
-            "unmeasurable metadata is discarded as a suffix"
+            EntityDataListT::for_version(V::V_1_15_2)
+                .read(&mut read)
+                .is_err()
         );
     }
 
@@ -408,7 +404,9 @@ mod tests {
         let entries = EntityDataListT::for_version(V::V_1_21_4)
             .read(&mut read)
             .unwrap();
-        assert_eq!(entries[0].value, MetaValue::BlockState(256));
+        let ids = MappingData::get().composed(V::V_1_21_4);
+        let canonical = ids.blockstates_inverse().map(256).unwrap();
+        assert_eq!(entries[0].value, MetaValue::BlockState(canonical as i32));
         assert_eq!(entries[1].value, MetaValue::OptionalBlockState(0));
     }
 

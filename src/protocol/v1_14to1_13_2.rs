@@ -736,7 +736,6 @@ mod tests {
         payload.write_var_int(&VarInt(0)).unwrap();
         payload.write_string("time").unwrap();
         payload.write_string("minecraft:time").unwrap();
-        payload.write_u8(0).unwrap();
         payload.write_var_int(&VarInt(0)).unwrap();
 
         let mut wrapper = PacketWrapper::new(&clientbound::play::COMMANDS, &payload);

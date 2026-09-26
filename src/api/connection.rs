@@ -262,7 +262,7 @@ mod tests {
 
         for id in 10..(10 + MAX_UNBOUND_CONNECTIONS as u64 + 1) {
             let mut connection = UserConnection::new(id, JavaMinecraftVersion::V_1_20);
-            connection.last_used = now - Duration::from_secs(id - 9);
+            connection.last_used = now - Duration::from_millis(id - 9);
             connections.insert(id, connection);
         }
 

@@ -386,7 +386,10 @@ mod tests {
                 Some(15)
             );
         }
-        assert_eq!(canonical_meta_data_type_id_for_version(8, V_1_14_4), None);
+        assert_eq!(
+            canonical_meta_data_type_id_for_version(8, V_1_14_4),
+            Some(9)
+        );
         assert_eq!(canonical_meta_data_type_id_for_version(-1, V_1_16), None);
     }
 

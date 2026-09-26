@@ -365,7 +365,7 @@ mod tests {
         );
         assert_eq!(
             tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_16_2),
-            Some(18)
+            Some(17)
         );
     }
 

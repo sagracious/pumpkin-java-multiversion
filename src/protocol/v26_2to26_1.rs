@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::OnceLock;
+
 use pumpkin_data::entity::EntityType;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::NetworkWriteExt;
@@ -54,7 +57,7 @@ fn player_team(
         return Ok(());
     }
 
-    let component = wrapper.passthrough(&TextComponentT::for_version(V::V_26_3))?;
+    let component = wrapper.read(&TextComponentT::for_version(V::V_26_3))?;
     let prefix = wrapper.read(&TextComponentT::for_version(V::V_26_3))?;
     let suffix = wrapper.read(&TextComponentT::for_version(V::V_26_3))?;
     let visibility = wrapper.read(&VAR_INT)?;
@@ -191,7 +194,7 @@ fn chunk_bed_entities(
         wrapper.remaining(),
         ctx.layout,
         connection.entity_tracker.min_y,
-        |state| state_is_26_2_bed(state, ctx.layout),
+        |state| state_is_26_2_bed(state, connection.version),
     )
     .ok_or(TranslateError::Unsupported("chunk bed block entities"))?;
     if positions.is_empty() {
@@ -199,7 +202,7 @@ fn chunk_bed_entities(
         return Ok(());
     }
 
-    let entity_type = bed_block_entity_type_id(ctx.layout)
+    let entity_type = bed_block_entity_type_id(connection.version)
         .ok_or(TranslateError::Unsupported("bed block entity type"))?;
     let additions: Vec<_> = positions
         .into_iter()
@@ -219,35 +222,59 @@ fn state_is_26_2_bed(client_state: i32, version: V) -> bool {
     let Ok(client_state) = u32::try_from(client_state) else {
         return false;
     };
-    let Some(source_26_3) = MappingData::get()
-        .composed(version)
-        .blockstates
-        .inverse()
-        .map(client_state)
-    else {
-        return false;
-    };
-    let Some(state_26_2) = MappingData::get()
-        .composed(V::V_26_2)
-        .blockstates
-        .map(source_26_3)
-    else {
-        return false;
-    };
-    (1931..=2186).contains(&state_26_2)
+    bed_states_by_version()
+        .iter()
+        .find(|(target, _)| *target == version)
+        .is_some_and(|(_, states)| states.contains(&client_state))
 }
 
 fn bed_block_entity_type_id(version: V) -> Option<i32> {
-    let bed_id_26_3 = MappingData::get()
-        .composed(V::V_26_1)
-        .blockentities
-        .inverse()
-        .map(25)?;
-    MappingData::get()
-        .composed(version)
-        .blockentities
-        .map(bed_id_26_3)
-        .and_then(|id| i32::try_from(id).ok())
+    let mut entity_type = 25_u32; // `minecraft:bed` in the 26.1 registry.
+    if version == V::V_26_1 {
+        return Some(i32::try_from(entity_type).ok()?);
+    }
+    let mut started = false;
+    for protocol in crate::protocol::STEPS {
+        let step = protocol.step();
+        if !started && step.from != V::V_26_1 {
+            continue;
+        }
+        started = true;
+        entity_type = MappingData::get()
+            .step(step.from)
+            .blockentities
+            .map(entity_type)?;
+        if step.to == version {
+            return i32::try_from(entity_type).ok();
+        }
+    }
+    None
+}
+
+fn bed_states_by_version() -> &'static [(V, HashSet<u32>)] {
+    static STATES: OnceLock<Vec<(V, HashSet<u32>)>> = OnceLock::new();
+    STATES.get_or_init(|| {
+        let source = MappingData::get().composed(V::V_26_2).blockstates;
+        let source_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
+        crate::protocol::VERSIONS
+            .iter()
+            .copied()
+            .map(|version| {
+                let target = MappingData::get().composed(version).blockstates;
+                let mut states = HashSet::new();
+                for source_state in 0..source_len {
+                    if source
+                        .map(source_state)
+                        .is_some_and(|state| (1931..=2186).contains(&state))
+                        && let Some(state) = target.map(source_state)
+                    {
+                        states.insert(state);
+                    }
+                }
+                (version, states)
+            })
+            .collect()
+    })
 }
 
 fn bed_block_entity_payload(position: i64, version: V) -> Option<Vec<u8>> {
@@ -408,11 +435,9 @@ mod tests {
     }
 
     fn bed_state_for(version: V) -> i32 {
-        let source_26_3 = MappingData::get()
-            .composed(V::V_26_2)
-            .blockstates
-            .inverse()
-            .map(1931)
+        let source = MappingData::get().composed(V::V_26_2).blockstates;
+        let source_26_3 = (0..u32::try_from(source.len()).unwrap())
+            .find(|state| source.map(*state).is_some_and(|mapped| mapped == 1931))
             .expect("26.2 bed state has a 26.3 mapping");
         i32::try_from(
             MappingData::get()

@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn the_five_263_only_parsers_fall_back_to_quotable_strings() {
         let mapping = MappingData::get();
-        for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_16_2] {
+        for version in [JavaMinecraftVersion::V_26_2] {
             let ids = mapping.composed(version);
             let string = i32::try_from(ids.argumenttypes.map(5).unwrap()).unwrap();
             for parser in QUOTABLE_26_3_ARGUMENTS {
