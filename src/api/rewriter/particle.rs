@@ -3,12 +3,15 @@ use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{ReadingError, WritingError};
 use pumpkin_util::version::JavaMinecraftVersion;
 
+use crate::api::rewriter::item::{
+    read_native_item_value, rewrite_item_value, rewrite_item_value_with_connection,
+};
 use crate::api::rewriter::sound;
 use crate::api::types::{BOOL, F32T, F64T, I8T, I32T, I64T, STRING, VAR_INT, WireType};
-use crate::api::{ComposedMappings, IdMapping, PacketWrapper, TranslateError, UserConnection};
+use crate::api::{ComposedMappings, MappingData, PacketWrapper, TranslateError, UserConnection};
 
 /// A particle as 26.3 wrote it: the registry id and its option data.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Particle {
     pub id: i32,
     pub data: ParticleData,
@@ -24,7 +27,7 @@ pub enum VibrationSource {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParticleData {
     None,
     Block(u32),
@@ -38,6 +41,9 @@ pub enum ParticleData {
         scale: f32,
     },
     Vibration {
+        /// The source block position required by the 1.17/1.18 wire shape.
+        /// Modern packets carry the particle's origin as its outer position.
+        origin: Option<i64>,
         source: VibrationSource,
         ticks: i32,
     },
@@ -59,6 +65,8 @@ pub enum ParticleData {
         water_blocks: i32,
         impulse: f32,
     },
+    /// A native 26.3 item stack embedded in an item particle.
+    Item(Vec<u8>),
 }
 
 /// The option data a version reads for one particle.
@@ -77,7 +85,7 @@ enum Shape {
     TransitionScaleLast,
     /// Both colours as floats with the scale between them, up to 1.20.3.
     TransitionScaleMid,
-    /// A source position, the source type as a string and the arrival, 1.17 and 1.18.
+    /// An origin position, a named target source and the arrival, 1.17 and 1.18.
     VibrationWithSource,
     /// The source type as a string, from 1.19.
     VibrationNamed,
@@ -300,12 +308,18 @@ fn mapped_shape(mapped: u32, layout: JavaMinecraftVersion, ids: &ComposedMapping
     Shape::None
 }
 
-fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError> {
+fn read_data(
+    r: &mut &[u8],
+    shape: Shape,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+) -> Result<ParticleData, TranslateError> {
     Ok(match shape {
         Shape::None => ParticleData::None,
-        // The item agent's `rewrite_item` fills this in; until then the packet
-        // goes rather than a 26.3 stack.
-        Shape::Item => return Err(TranslateError::Unsupported("item particle")),
+        Shape::Item => ParticleData::Item(
+            read_native_item_value(r, layout, ids)
+                .ok_or(TranslateError::Unsupported("particle item"))?,
+        ),
         Shape::Block => {
             let state = VAR_INT.read(r)?.0;
             ParticleData::Block(
@@ -346,6 +360,7 @@ fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError
                 }
             };
             ParticleData::Vibration {
+                origin: None,
                 source,
                 ticks: VAR_INT.read(r)?.0,
             }
@@ -393,12 +408,29 @@ fn read_data(r: &mut &[u8], shape: Shape) -> Result<ParticleData, TranslateError
                 return Err(TranslateError::Unsupported("vibration source"));
             };
             ParticleData::Vibration {
+                origin: None,
                 source,
                 ticks: VAR_INT.read(r)?.0,
             }
         }
         Shape::VibrationWithSource => {
-            return Err(TranslateError::Unsupported("vibration source shape"));
+            let origin = I64T.read(r)?;
+            let source_name = STRING.read(r)?;
+            let source = if source_name.ends_with(":block") {
+                VibrationSource::Block(I64T.read(r)?)
+            } else if source_name.ends_with(":entity") {
+                VibrationSource::Entity {
+                    id: VAR_INT.read(r)?.0,
+                    y_offset: 0.0,
+                }
+            } else {
+                return Err(TranslateError::Unsupported("vibration source"));
+            };
+            ParticleData::Vibration {
+                origin: Some(origin),
+                source,
+                ticks: VAR_INT.read(r)?.0,
+            }
         }
     })
 }
@@ -428,12 +460,15 @@ fn write_data(
     out: &mut Vec<u8>,
     data: &ParticleData,
     shape: Shape,
-    blockstates: &IdMapping,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+    connection: Option<&mut UserConnection>,
 ) -> Result<bool, TranslateError> {
     match (shape, data) {
-        (Shape::None, _) => {}
+        (Shape::None, ParticleData::None) => {}
+        (Shape::None, _) => return Ok(false),
         (Shape::Block, ParticleData::Block(state)) => {
-            let state = blockstates.map(*state).unwrap_or(0);
+            let state = ids.blockstates.map(*state).unwrap_or(0);
             VAR_INT.write(out, &VarInt(i32::try_from(state).unwrap_or(0)))?;
         }
         (Shape::DustRgb, ParticleData::Dust { rgb, scale }) => {
@@ -459,7 +494,7 @@ fn write_data(
             F32T.write(out, scale)?;
             rgb_floats(*to, out)?;
         }
-        (Shape::VibrationTyped, ParticleData::Vibration { source, ticks }) => {
+        (Shape::VibrationTyped, ParticleData::Vibration { source, ticks, .. }) => {
             match source {
                 VibrationSource::Block(position) => {
                     VAR_INT.write(out, &VarInt(0))?;
@@ -473,7 +508,7 @@ fn write_data(
             }
             VAR_INT.write(out, &VarInt(*ticks))?;
         }
-        (Shape::VibrationNamed, ParticleData::Vibration { source, ticks }) => {
+        (Shape::VibrationNamed, ParticleData::Vibration { source, ticks, .. }) => {
             match source {
                 VibrationSource::Block(position) => {
                     STRING.write(out, &"minecraft:block".into())?;
@@ -487,8 +522,30 @@ fn write_data(
             }
             VAR_INT.write(out, &VarInt(*ticks))?;
         }
-        // 1.17 and 1.18 want the position the vibration started from, which
-        // the packet no longer carries.
+        (
+            Shape::VibrationWithSource,
+            ParticleData::Vibration {
+                origin: Some(origin),
+                source,
+                ticks,
+            },
+        ) => {
+            I64T.write(out, origin)?;
+            match source {
+                VibrationSource::Block(position) => {
+                    STRING.write(out, &"minecraft:block".into())?;
+                    I64T.write(out, position)?;
+                }
+                VibrationSource::Entity { id, .. } => {
+                    STRING.write(out, &"minecraft:entity".into())?;
+                    VAR_INT.write(out, &VarInt(*id))?;
+                }
+            }
+            VAR_INT.write(out, &VarInt(*ticks))?;
+        }
+        (Shape::VibrationWithSource, ParticleData::Vibration { origin: None, .. }) => {
+            return Ok(false);
+        }
         (Shape::VibrationWithSource, _) => return Ok(false),
         (Shape::Float, ParticleData::Float(value)) => F32T.write(out, value)?,
         (Shape::Delay, ParticleData::Delay(value)) => VAR_INT.write(out, &VarInt(*value))?,
@@ -532,6 +589,22 @@ fn write_data(
             I32T.write(out, water_blocks)?;
             F32T.write(out, impulse)?;
         }
+        (Shape::Item, ParticleData::Item(item)) => {
+            let mut input = item.as_slice();
+            let rewritten = match connection {
+                Some(connection) => {
+                    rewrite_item_value_with_connection(&mut input, layout, ids, connection)
+                }
+                None => rewrite_item_value(&mut input, layout, ids),
+            };
+            let Some(rewritten) = rewritten else {
+                return Ok(false);
+            };
+            if !input.is_empty() {
+                return Ok(false);
+            }
+            out.extend_from_slice(&rewritten);
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -539,7 +612,13 @@ fn write_data(
 
 /// Reads the option data 26.3 writes for `id`.
 pub fn read_particle_data(r: &mut &[u8], id: i32) -> Result<ParticleData, TranslateError> {
-    read_data(r, shape_of(id, JavaMinecraftVersion::V_26_3))
+    let layout = JavaMinecraftVersion::V_26_3;
+    read_data(
+        r,
+        shape_of(id, layout),
+        layout,
+        MappingData::get().composed(layout),
+    )
 }
 
 pub fn read_particle(r: &mut &[u8]) -> Result<Particle, TranslateError> {
@@ -562,11 +641,11 @@ pub fn read_particle_for_layout(
         .and_then(|id| ids.particles_inverse().map(id))
         .and_then(|id| i32::try_from(id).ok())
         .ok_or(TranslateError::Unsupported("particle id reverse mapping"))?;
-    let mut data = read_data(r, shape_of(canonical_id, layout))?;
-    if let ParticleData::Block(wire_state) = data {
+    let mut data = read_data(r, shape_of(canonical_id, layout), layout, ids)?;
+    if let ParticleData::Block(wire_state) = &data {
         let canonical_state =
             ids.blockstates_inverse()
-                .map(wire_state)
+                .map(*wire_state)
                 .ok_or(TranslateError::Unsupported(
                     "particle block state reverse mapping",
                 ))?;
@@ -595,17 +674,60 @@ pub fn write_particle(
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
 ) -> Result<bool, TranslateError> {
+    write_particle_inner(out, particle, layout, ids, None)
+}
+
+/// Writes a particle and records client-inexpressible data in its nested item
+/// stack using the owning player's backup cache.
+pub fn write_particle_with_connection(
+    out: &mut Vec<u8>,
+    particle: &Particle,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+    connection: &mut UserConnection,
+) -> Result<bool, TranslateError> {
+    write_particle_inner(out, particle, layout, ids, Some(connection))
+}
+
+fn write_particle_inner(
+    out: &mut Vec<u8>,
+    particle: &Particle,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+    connection: Option<&mut UserConnection>,
+) -> Result<bool, TranslateError> {
     let Some(mapped) = mapped_id(particle.id, ids) else {
         return Ok(false);
     };
     let shape = mapped_shape(u32::try_from(mapped).unwrap_or(0), layout, ids);
     let mut data = Vec::new();
-    if !write_data(&mut data, &particle.data, shape, &ids.blockstates)? {
+    if !write_data(&mut data, &particle.data, shape, layout, ids, connection)? {
         return Ok(false);
     }
     VAR_INT.write(out, &VarInt(mapped))?;
     out.extend_from_slice(&data);
     Ok(true)
+}
+
+/// Packs a particle packet's position as a block position for the 1.17/1.18
+/// vibration option. Those layouts carry the particle origin in the option.
+fn vibration_origin(x: f64, y: f64, z: f64) -> Option<i64> {
+    fn coordinate(value: f64, min: i32, max: i32) -> Option<i32> {
+        let value = value.floor();
+        if !value.is_finite() || value < f64::from(min) || value > f64::from(max) {
+            return None;
+        }
+        Some(value as i32)
+    }
+
+    let x = coordinate(x, -(1 << 25), (1 << 25) - 1)?;
+    let y = coordinate(y, -(1 << 11), (1 << 11) - 1)?;
+    let z = coordinate(z, -(1 << 25), (1 << 25) - 1)?;
+    Some(
+        ((i64::from(x) & 0x3ff_ffff) << 38)
+            | ((i64::from(z) & 0x3ff_ffff) << 12)
+            | (i64::from(y) & 0xfff),
+    )
 }
 
 /// One particle as 26.3 writes it: the id and its option data.
@@ -625,7 +747,14 @@ impl WireType for ParticleT {
     fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
         VAR_INT.write(w, &VarInt(v.id))?;
         let shape = shape_of(v.id, JavaMinecraftVersion::V_26_3);
-        match write_data(w, &v.data, shape, &IdMapping::IDENTITY) {
+        match write_data(
+            w,
+            &v.data,
+            shape,
+            JavaMinecraftVersion::V_26_3,
+            MappingData::get().composed(JavaMinecraftVersion::V_26_3),
+            None,
+        ) {
             Ok(true) => Ok(()),
             Ok(false) => Err(WritingError::Message("particle option data".to_string())),
             Err(TranslateError::Write(error)) => Err(error),
@@ -643,9 +772,43 @@ pub fn rewrite_particle(
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
 ) -> Result<bool, TranslateError> {
-    let particle = wrapper.read(&PARTICLE)?;
+    rewrite_particle_with_origin(wrapper, layout, ids, None, None)
+}
+
+/// Rewrites one packet particle with access to the player's item backup cache.
+pub fn rewrite_particle_packet_with_connection(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+) -> Result<bool, TranslateError> {
+    rewrite_particle_with_origin(wrapper, layout, ids, None, Some(connection))
+}
+
+fn rewrite_particle_with_origin(
+    wrapper: &mut PacketWrapper,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+    origin: Option<i64>,
+    connection: Option<&mut UserConnection>,
+) -> Result<bool, TranslateError> {
+    let mut particle = wrapper.read(&PARTICLE)?;
+    if layout < JavaMinecraftVersion::V_1_19
+        && let ParticleData::Vibration {
+            origin: particle_origin,
+            ..
+        } = &mut particle.data
+    {
+        *particle_origin = origin;
+    }
     let mut out = Vec::new();
-    if !write_particle(&mut out, &particle, layout, ids)? {
+    let written = match connection {
+        Some(connection) => {
+            write_particle_with_connection(&mut out, &particle, layout, ids, connection)?
+        }
+        None => write_particle(&mut out, &particle, layout, ids)?,
+    };
+    if !written {
         return Ok(false);
     }
     wrapper.write_bytes(&out);
@@ -656,14 +819,14 @@ pub fn rewrite_particle(
 /// the count from 1.20.5; below that the id leads and the option data trails.
 pub fn level_particles(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     use JavaMinecraftVersion as V;
 
     if layout >= V::V_26_3 {
-        if !rewrite_particle(wrapper, layout, ids)? {
+        if !rewrite_particle_packet_with_connection(wrapper, connection, layout, ids)? {
             wrapper.cancel();
             return Ok(());
         }
@@ -676,14 +839,17 @@ pub fn level_particles(
         if layout >= V::V_1_21_4 {
             wrapper.passthrough(&BOOL)?;
         }
-        for _ in 0..3 {
-            wrapper.passthrough(&F64T)?;
-        }
+        let x = wrapper.passthrough(&F64T)?;
+        let y = wrapper.passthrough(&F64T)?;
+        let z = wrapper.passthrough(&F64T)?;
         for _ in 0..4 {
             wrapper.passthrough(&F32T)?;
         }
         wrapper.passthrough(&I32T)?;
-        if !rewrite_particle(wrapper, layout, ids)? {
+        let origin = (layout < V::V_1_19)
+            .then(|| vibration_origin(x, y, z))
+            .flatten();
+        if !rewrite_particle_with_origin(wrapper, layout, ids, origin, Some(connection))? {
             wrapper.cancel();
         }
         return Ok(());
@@ -705,13 +871,19 @@ pub fn level_particles(
     }
 
     wrapper.passthrough(&BOOL)?;
-    for _ in 0..3 {
-        if layout >= V::V_1_15 {
-            wrapper.passthrough(&F64T)?;
-        } else {
-            wrapper.passthrough(&F32T)?;
-        }
-    }
+    let (x, y, z) = if layout >= V::V_1_15 {
+        (
+            wrapper.passthrough(&F64T)?,
+            wrapper.passthrough(&F64T)?,
+            wrapper.passthrough(&F64T)?,
+        )
+    } else {
+        (
+            f64::from(wrapper.passthrough(&F32T)?),
+            f64::from(wrapper.passthrough(&F32T)?),
+            f64::from(wrapper.passthrough(&F32T)?),
+        )
+    };
     for _ in 0..3 {
         wrapper.passthrough(&F32T)?;
     }
@@ -720,27 +892,40 @@ pub fn level_particles(
     let count = wrapper.read(&I32T)?;
     // The option data is the rest of the payload here.
     let mut cursor = wrapper.remaining();
-    let data = read_particle_data(&mut cursor, id)?;
+    let mut data = read_particle_data(&mut cursor, id)?;
     if !cursor.is_empty() {
         return Err(TranslateError::TrailingBytes(cursor.len()));
     }
     wrapper.consume_remaining();
     let shape = mapped_shape(u32::try_from(mapped).unwrap_or(0), layout, ids);
+    if layout < V::V_1_19
+        && let ParticleData::Vibration {
+            origin: particle_origin,
+            ..
+        } = &mut data
+    {
+        *particle_origin = vibration_origin(x, y, z);
+    }
 
     // 1.20.5 folded the potion colour into the particle's own data; below it
     // the client takes an unused speed as the colour.
     let entity_effect = u16::try_from(id).ok() == Some(ParticleKind::EntityEffect.to_id());
-    let speed = match &data {
-        ParticleData::Color(colour) if entity_effect && shape == Shape::None && speed == 0.0 => {
-            *colour as f32
+    let mut speed = speed;
+    if entity_effect && shape == Shape::None {
+        if let ParticleData::Color(colour) = &data {
+            if speed == 0.0 {
+                speed = *colour as f32;
+            }
+            // Older clients carry this color in the packet's speed field and
+            // have no particle option bytes to read.
+            data = ParticleData::None;
         }
-        _ => speed,
-    };
+    }
 
     wrapper.write(&F32T, &speed)?;
     wrapper.write(&I32T, &count)?;
     let mut out = Vec::new();
-    if write_data(&mut out, &data, shape, &ids.blockstates)? {
+    if write_data(&mut out, &data, shape, layout, ids, Some(connection))? {
         wrapper.write_bytes(&out);
     } else {
         wrapper.cancel();
@@ -752,7 +937,7 @@ pub fn level_particles(
 /// 1.21.2, 1.20.5, 1.20.3, 1.19.3 and 1.17 (`java/client/play/explode.rs`).
 pub fn explode(
     wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
+    connection: &mut UserConnection,
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
@@ -771,7 +956,8 @@ pub fn explode(
                 wrapper.passthrough(&F64T)?;
             }
         }
-        if !rewrite_particle(wrapper, layout, ids)? || !sound::rewrite_holder(wrapper, layout, ids)?
+        if !rewrite_particle_packet_with_connection(wrapper, connection, layout, ids)?
+            || !sound::rewrite_holder(wrapper, layout, ids)?
         {
             wrapper.cancel();
             return Ok(());
@@ -779,7 +965,7 @@ pub fn explode(
         if layout >= V::V_1_21_9 {
             let block_particles = wrapper.passthrough(&VAR_INT)?.0;
             for _ in 0..block_particles {
-                if !rewrite_particle(wrapper, layout, ids)? {
+                if !rewrite_particle_packet_with_connection(wrapper, connection, layout, ids)? {
                     wrapper.cancel();
                     return Ok(());
                 }
@@ -817,7 +1003,7 @@ pub fn explode(
     if layout >= V::V_1_20_3 {
         wrapper.passthrough(&VAR_INT)?;
         for _ in 0..2 {
-            if !rewrite_particle(wrapper, layout, ids)? {
+            if !rewrite_particle_packet_with_connection(wrapper, connection, layout, ids)? {
                 wrapper.cancel();
                 return Ok(());
             }
@@ -836,7 +1022,13 @@ pub fn explode(
 mod tests {
     use super::*;
     use crate::api::MappingData;
+    use crate::api::rewriter::item::ClientboundItemT;
+    use crate::api::rewriter::item::StructuredItemRewriter;
+    use crate::api::rewriter::item_backup::restore_full_item;
+    use crate::api::types::{Item, ItemComponent, ItemT};
     use crate::packet::mappings::clientbound::play::{EXPLODE, LEVEL_PARTICLES};
+    use pumpkin_data::data_component::DataComponent;
+    use pumpkin_data::item::Item as DataItem;
     use pumpkin_protocol::ser::NetworkWriteExt;
 
     fn run(
@@ -866,6 +1058,151 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn item_particles_rewrite_the_nested_stack_for_old_clients() {
+        let source_item = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND.id),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        let mut item_bytes = Vec::new();
+        ItemT::for_version(JavaMinecraftVersion::V_26_3)
+            .write(&mut item_bytes, &source_item)
+            .unwrap();
+        let source_particle = Particle {
+            id: i32::from(ParticleKind::Item.to_id()),
+            data: ParticleData::Item(item_bytes),
+        };
+
+        for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_16_2] {
+            let ids = MappingData::get().composed(version);
+            let mut output = Vec::new();
+            assert!(write_particle(&mut output, &source_particle, version, ids).unwrap());
+
+            let mut input = output.as_slice();
+            assert_eq!(
+                VAR_INT.read(&mut input).unwrap().0,
+                mapped(i32::from(ParticleKind::Item.to_id()), version)
+            );
+            let item = ClientboundItemT::new(version, ids)
+                .read(&mut input)
+                .unwrap();
+            assert!(input.is_empty());
+            let Item::Structured { id, .. } = item else {
+                panic!("diamond item particle remains a structured stack");
+            };
+            assert_eq!(id, i32::from(DataItem::DIAMOND.id), "{version}");
+        }
+    }
+
+    #[test]
+    fn item_particles_read_and_rewrite_nested_stacks_from_older_layouts() {
+        let source_item = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND.id),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+
+        for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_16_2] {
+            let ids = MappingData::get().composed(version);
+            let target_item = StructuredItemRewriter::to_version(&source_item, version, ids);
+            let mut payload = Vec::new();
+            VAR_INT
+                .write(
+                    &mut payload,
+                    &VarInt(mapped(i32::from(ParticleKind::Item.to_id()), version)),
+                )
+                .unwrap();
+            ItemT::for_version(version)
+                .write(&mut payload, &target_item)
+                .unwrap();
+
+            let mut input = payload.as_slice();
+            let particle = read_particle_for_layout(&mut input, version, ids).unwrap();
+            assert!(input.is_empty(), "{version}");
+            assert_eq!(particle.id, i32::from(ParticleKind::Item.to_id()));
+
+            let mut output = Vec::new();
+            assert!(write_particle(&mut output, &particle, version, ids).unwrap());
+            let mut translated = output.as_slice();
+            assert_eq!(
+                VAR_INT.read(&mut translated).unwrap().0,
+                mapped(i32::from(ParticleKind::Item.to_id()), version),
+                "{version}"
+            );
+            let item = ClientboundItemT::new(version, ids)
+                .read(&mut translated)
+                .unwrap();
+            assert!(translated.is_empty(), "{version}");
+            assert_eq!(
+                item.item_id(),
+                Some(i32::from(DataItem::DIAMOND.id)),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn item_particles_use_the_player_backup_cache() {
+        let version = JavaMinecraftVersion::V_1_21_4;
+        let ids = MappingData::get().composed(version);
+        let item = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND.id),
+            added: vec![ItemComponent {
+                id: i32::from(DataComponent::AttackAnimation.to_id()),
+                data: vec![1, 6],
+            }],
+            removed: Vec::new(),
+        };
+        let mut item_bytes = Vec::new();
+        ItemT::for_version(JavaMinecraftVersion::V_26_3)
+            .write(&mut item_bytes, &item)
+            .unwrap();
+        let particle = Particle {
+            id: i32::from(ParticleKind::Item.to_id()),
+            data: ParticleData::Item(item_bytes),
+        };
+        let mut connection = UserConnection::new(22, version);
+        let mut output = Vec::new();
+        assert!(
+            write_particle_with_connection(&mut output, &particle, version, ids, &mut connection,)
+                .unwrap()
+        );
+
+        let mut read = output.as_slice();
+        VAR_INT.read(&mut read).unwrap(); // Particle id
+        let mut returned = ClientboundItemT::new(version, ids).read(&mut read).unwrap();
+        assert!(read.is_empty());
+        restore_full_item(&connection, &mut returned, version, ids);
+        let Item::Structured { added, .. } = returned else {
+            panic!("the item particle contains a structured item");
+        };
+        assert!(added.contains(&ItemComponent {
+            id: i32::from(DataComponent::AttackAnimation.to_id()),
+            data: vec![1, 6],
+        }));
+    }
+
+    #[test]
+    fn a_particle_without_a_known_shape_does_not_drop_option_bytes() {
+        let mut output = Vec::new();
+        assert!(
+            !write_data(
+                &mut output,
+                &ParticleData::Color(0x1122_3344),
+                Shape::None,
+                JavaMinecraftVersion::V_26_2,
+                MappingData::get().composed(JavaMinecraftVersion::V_26_2),
+                None,
+            )
+            .unwrap()
+        );
+        assert!(output.is_empty());
     }
 
     /// The `LEVEL_PARTICLES` core writes: the id leads below 1.20.5 and
@@ -929,11 +1266,12 @@ mod tests {
             .unwrap();
         assert_eq!(out, expected);
 
-        // 1.18 wants the position a vibration started from, which the packet
-        // no longer carries, and the geysers are 26.2's.
+        // 1.18 needs an outer particle position to synthesize the vibration
+        // origin; this direct seam has none. Geysers are 26.2's.
         let vibration = Particle {
             id: i32::from(ParticleKind::Vibration.to_id()),
             data: ParticleData::Vibration {
+                origin: None,
                 source: VibrationSource::Block(0),
                 ticks: 20,
             },
@@ -949,6 +1287,112 @@ mod tests {
         assert!(!write_particle(&mut out, &vibration, version, ids).unwrap());
         assert!(!write_particle(&mut out, &geyser, version, ids).unwrap());
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn level_vibrations_get_their_origin_from_the_packet_position_for_1_18() {
+        let version = JavaMinecraftVersion::V_1_18_2;
+        let id = i32::from(ParticleKind::Vibration.to_id());
+        let destination = 0x0000_0004_0000_0005i64;
+        let mut data = Vec::new();
+        VAR_INT.write(&mut data, &VarInt(0)).unwrap();
+        I64T.write(&mut data, &destination).unwrap();
+        VAR_INT.write(&mut data, &VarInt(20)).unwrap();
+
+        let output = run(
+            level_particles,
+            &LEVEL_PARTICLES,
+            &particles_payload(id, &data, version),
+            version,
+        )
+        .unwrap();
+        let mut translated = output.as_slice();
+        assert_eq!(I32T.read(&mut translated).unwrap(), mapped(id, version));
+        assert!(BOOL.read(&mut translated).unwrap());
+        assert_eq!(F64T.read(&mut translated).unwrap(), 1.0);
+        assert_eq!(F64T.read(&mut translated).unwrap(), 2.0);
+        assert_eq!(F64T.read(&mut translated).unwrap(), 3.0);
+        for expected in [0.1f32, 0.2, 0.3, 0.5] {
+            assert_eq!(F32T.read(&mut translated).unwrap(), expected);
+        }
+        assert_eq!(I32T.read(&mut translated).unwrap(), 4);
+        let origin = ((1i64 & 0x3ff_ffff) << 38) | ((3i64 & 0x3ff_ffff) << 12) | (2i64 & 0xfff);
+        assert_eq!(I64T.read(&mut translated).unwrap(), origin);
+        assert_eq!(
+            STRING.read(&mut translated).unwrap().as_str(),
+            "minecraft:block"
+        );
+        assert_eq!(I64T.read(&mut translated).unwrap(), destination);
+        assert_eq!(VAR_INT.read(&mut translated).unwrap().0, 20);
+        assert!(translated.is_empty());
+    }
+
+    #[test]
+    fn legacy_vibration_particle_data_keeps_its_origin_position() {
+        let version = JavaMinecraftVersion::V_1_18_2;
+        let ids = MappingData::get().composed(version);
+        let id = i32::from(ParticleKind::Vibration.to_id());
+        let origin = 0x0000_0001_0000_0002i64;
+        let destination = 0x0000_0004_0000_0005i64;
+        let mut input = Vec::new();
+        VAR_INT
+            .write(&mut input, &VarInt(mapped(id, version)))
+            .unwrap();
+        I64T.write(&mut input, &origin).unwrap();
+        STRING.write(&mut input, &"minecraft:block".into()).unwrap();
+        I64T.write(&mut input, &destination).unwrap();
+        VAR_INT.write(&mut input, &VarInt(20)).unwrap();
+
+        let mut cursor = input.as_slice();
+        let particle = read_particle_for_layout(&mut cursor, version, ids).unwrap();
+        assert!(cursor.is_empty());
+        assert!(matches!(
+            &particle.data,
+            ParticleData::Vibration {
+                origin: Some(found),
+                source: VibrationSource::Block(found_destination),
+                ticks: 20,
+            } if *found == origin && *found_destination == destination
+        ));
+
+        let mut output = Vec::new();
+        assert!(write_particle(&mut output, &particle, version, ids).unwrap());
+        assert_eq!(output, input);
+
+        let mut entity_input = Vec::new();
+        VAR_INT
+            .write(&mut entity_input, &VarInt(mapped(id, version)))
+            .unwrap();
+        I64T.write(&mut entity_input, &origin).unwrap();
+        STRING
+            .write(&mut entity_input, &"minecraft:entity".into())
+            .unwrap();
+        VAR_INT.write(&mut entity_input, &VarInt(45)).unwrap();
+        VAR_INT.write(&mut entity_input, &VarInt(20)).unwrap();
+        let mut cursor = entity_input.as_slice();
+        let particle = read_particle_for_layout(&mut cursor, version, ids).unwrap();
+        assert!(cursor.is_empty());
+        assert!(matches!(
+            &particle.data,
+            ParticleData::Vibration {
+                origin: Some(found),
+                source: VibrationSource::Entity { id: 45, .. },
+                ticks: 20,
+            } if *found == origin
+        ));
+        let mut output = Vec::new();
+        assert!(write_particle(&mut output, &particle, version, ids).unwrap());
+        assert_eq!(output, entity_input);
+    }
+
+    #[test]
+    fn vibration_origin_uses_floor_and_rejects_unrepresentable_positions() {
+        let origin = vibration_origin(-0.25, -64.1, 3.99).unwrap();
+        let expected =
+            ((-1i64 & 0x3ff_ffff) << 38) | ((3i64 & 0x3ff_ffff) << 12) | (-65i64 & 0xfff);
+        assert_eq!(origin, expected);
+        assert!(vibration_origin(f64::NAN, 0.0, 0.0).is_none());
+        assert!(vibration_origin(0.0, 2048.0, 0.0).is_none());
     }
 
     /// Flame takes no option data on any version, so only its id moves.
@@ -1009,21 +1453,28 @@ mod tests {
     /// 1.20.5 gave `entity_effect` its colour; below it the client takes an
     /// unused speed as the colour instead.
     #[test]
-    fn the_potion_colour_moves_into_the_speed_below_1_20_5() {
+    fn the_potion_colour_moves_into_speed_without_particle_option_bytes_below_1_20_5() {
         let version = JavaMinecraftVersion::V_1_20_2;
         let effect = i32::from(ParticleKind::EntityEffect.to_id());
         let speed = 1 + 1 + 24 + 12;
 
-        let mut payload = particles_payload(effect, &[], version);
-        payload[speed..speed + 4].copy_from_slice(&0f32.to_be_bytes());
-        payload.write_i32_be(64).unwrap();
+        for original_speed in [0.0f32, 1.5] {
+            let mut payload = particles_payload(effect, &[], version);
+            payload[speed..speed + 4].copy_from_slice(&original_speed.to_be_bytes());
+            payload.write_i32_be(64).unwrap();
 
-        let mut expected = particles_payload(mapped(effect, version), &[], version);
-        expected[speed..speed + 4].copy_from_slice(&64f32.to_be_bytes());
-        assert_eq!(
-            run(level_particles, &LEVEL_PARTICLES, &payload, version).unwrap(),
-            expected
-        );
+            let mut expected = particles_payload(mapped(effect, version), &[], version);
+            let expected_speed = if original_speed == 0.0 {
+                64.0
+            } else {
+                original_speed
+            };
+            expected[speed..speed + 4].copy_from_slice(&expected_speed.to_be_bytes());
+            assert_eq!(
+                run(level_particles, &LEVEL_PARTICLES, &payload, version).unwrap(),
+                expected
+            );
+        }
     }
 
     /// The geyser particles are 26.2's and have no stand in below it.

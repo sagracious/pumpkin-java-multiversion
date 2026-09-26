@@ -320,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn malformed_tags_are_dropped_instead_of_sent_with_native_ids() {
+        assert!(
+            translate_clientbound(
+                0,
+                JavaMinecraftVersion::V_1_20_5,
+                PLAY,
+                clientbound::play::UPDATE_TAGS.v26_3,
+                &[1],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn malformed_registry_payloads_are_dropped_instead_of_sent_unchanged() {
+        use pumpkin_protocol::ser::NetworkWriteExt;
+
+        let mut malformed = Vec::new();
+        malformed.write_string("minecraft:dimension_type").unwrap();
+        assert!(
+            translate_clientbound(
+                0,
+                JavaMinecraftVersion::V_1_20_5,
+                4,
+                clientbound::config::REGISTRY_DATA.v26_3,
+                &malformed,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn serverbound_only_renumbers() {
         let version = JavaMinecraftVersion::V_1_20_2;
         let payload = [7u8, 7];

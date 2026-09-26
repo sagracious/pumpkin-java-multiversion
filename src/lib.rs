@@ -53,7 +53,7 @@ impl Plugin for MultiVersionPlugin {
         context.register_event_handler(PlayerLeaveHandler, EventPriority::Lowest, true)?;
 
         tracing::info!(
-            "Pumpkin Java Multi-Version Plugin enabled! Supporting {LOWEST_SUPPORTED} - {HIGHEST_SUPPORTED}"
+            "Pumpkin Java Multi-Version Plugin enabled. Version gate: {LOWEST_SUPPORTED} - {HIGHEST_SUPPORTED}; compatibility audit is in progress."
         );
         Ok(())
     }

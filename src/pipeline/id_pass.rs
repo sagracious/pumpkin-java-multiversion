@@ -87,6 +87,7 @@ fn table() -> &'static HashMap<usize, IdPass> {
         );
         put(&clientbound::play::SOUND, sound::sound);
         put(&clientbound::play::SOUND_ENTITY, sound::sound);
+        put(&clientbound::play::STOP_SOUND, sound::stop_sound);
         put(&clientbound::play::EXPLODE, particle::explode);
         put(
             &clientbound::play::LEVEL_PARTICLES,
@@ -101,9 +102,56 @@ fn table() -> &'static HashMap<usize, IdPass> {
         put(&clientbound::play::COMMANDS, command::commands);
         put(&clientbound::play::OPEN_SCREEN, screen::open_screen);
         put(&clientbound::play::MAP_ITEM_DATA, screen::map_item_data);
+        // The newer recipe-book packets have no legacy packet-id aliases, so
+        // bridge REMOVE/SETTINGS before the normal protocol-step loop.
+        put(&clientbound::play::RECIPE_BOOK_REMOVE, recipe_book_remove);
+        put(
+            &clientbound::play::RECIPE_BOOK_SETTINGS,
+            recipe_book_settings,
+        );
+        // Older recipe identifiers are synthetic strings; restore the numeric
+        // 26.3 display id after all client-version packet rewrites have run.
+        put(&serverbound::play::PLACE_RECIPE, place_recipe);
+        put(&serverbound::play::RECIPE_BOOK_SEEN_RECIPE, seen_recipe);
 
         table
     })
+}
+
+fn recipe_book_remove(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    layout: JavaMinecraftVersion,
+    _ids: &ComposedMappings,
+) -> Result<(), TranslateError> {
+    crate::packet::recipe_book::rewrite_legacy_recipe_book_remove(wrapper, connection, layout)
+}
+
+fn recipe_book_settings(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    layout: JavaMinecraftVersion,
+    _ids: &ComposedMappings,
+) -> Result<(), TranslateError> {
+    crate::packet::recipe_book::rewrite_legacy_recipe_book_settings(wrapper, connection, layout)
+}
+
+fn place_recipe(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    _layout: JavaMinecraftVersion,
+    _ids: &ComposedMappings,
+) -> Result<(), TranslateError> {
+    crate::packet::recipe_book::rewrite_legacy_place_recipe(wrapper, connection)
+}
+
+fn seen_recipe(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    _layout: JavaMinecraftVersion,
+    _ids: &ComposedMappings,
+) -> Result<(), TranslateError> {
+    crate::packet::recipe_book::rewrite_legacy_seen_recipe(wrapper, connection)
 }
 
 fn rewrite(
@@ -290,9 +338,10 @@ fn tags(
     layout: JavaMinecraftVersion,
     _ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    rewrite_or_pass(wrapper, |payload| {
-        update_tags::rewrite_update_tags(payload, layout)
-    })
+    let payload = update_tags::rewrite_update_tags(wrapper.remaining(), layout)
+        .ok_or(TranslateError::Unsupported("update tags"))?;
+    wrapper.replace_remaining(payload);
+    Ok(())
 }
 
 fn registry_data(
@@ -306,7 +355,7 @@ fn registry_data(
         Some(Some(payload)) => wrapper.replace_remaining(payload),
         // The version has no such registry; sending it would fail its whole load.
         Some(None) => wrapper.cancel(),
-        None => wrapper.passthrough_all(),
+        None => return Err(TranslateError::Unsupported("registry data")),
     }
     Ok(())
 }

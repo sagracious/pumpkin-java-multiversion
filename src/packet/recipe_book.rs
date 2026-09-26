@@ -12,6 +12,9 @@ use crate::api::types::{BOOL, F32T, ItemT, NbtT, STRING, TEMPLATE_ITEM, U8, VAR_
 use crate::api::{Ctx, MappingData, PacketWrapper, TranslateError, UserConnection};
 use crate::data::mappings::{ComposedMappings, IdMapping};
 
+#[path = "recipe_legacy.rs"]
+mod legacy;
+
 const MAX_RECIPE_ENTRIES: i32 = 16_384;
 const MAX_RECIPE_LIST: i32 = 4_096;
 
@@ -36,12 +39,11 @@ pub fn rewrite_recipe_book_add(
     ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     let target = connection.version;
-    if target < V::V_1_21_2 {
-        wrapper.cancel();
-        return Ok(());
-    }
     if ctx.layout != V::V_26_3 {
         return Err(TranslateError::Unsupported("recipe book source layout"));
+    }
+    if target < V::V_1_21_2 {
+        return legacy::rewrite_recipe_book_add(wrapper, connection, target);
     }
 
     let mappings = MappingData::get().composed(target);
@@ -54,23 +56,23 @@ pub fn rewrite_recipe_book_add(
         crafting_requirements(wrapper, mappings)?;
         wrapper.passthrough(&U8)?; // Notification/highlight flags
     }
+    wrapper.passthrough(&BOOL)?; // Replace the recipe-book contents
     Ok(())
 }
 
-/// Rewrites the recipe groups and stonecutter displays from the 26.3 packet.
-/// Older clients have no recipe-display format, so the packet is discarded.
+/// Rewrites recipe groups and stonecutter displays. For pre-1.21.2 clients,
+/// the legacy bridge retains stonecutter inputs until the next recipe-book add.
 pub fn rewrite_update_recipes(
     wrapper: &mut PacketWrapper,
     connection: &mut UserConnection,
     ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     let target = connection.version;
-    if target < V::V_1_21_2 {
-        wrapper.cancel();
-        return Ok(());
-    }
     if ctx.layout != V::V_26_3 {
         return Err(TranslateError::Unsupported("update recipes source layout"));
+    }
+    if target < V::V_1_21_2 {
+        return legacy::rewrite_update_recipes(wrapper, connection, target);
     }
 
     let mappings = MappingData::get().composed(target);
@@ -95,6 +97,36 @@ pub fn rewrite_update_recipes(
         slot_display(wrapper, connection, target, mappings, true)?;
     }
     Ok(())
+}
+
+pub(crate) fn rewrite_legacy_recipe_book_remove(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    layout: V,
+) -> Result<(), TranslateError> {
+    legacy::rewrite_recipe_book_remove(wrapper, connection, layout)
+}
+
+pub(crate) fn rewrite_legacy_recipe_book_settings(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    layout: V,
+) -> Result<(), TranslateError> {
+    legacy::rewrite_recipe_book_settings(wrapper, connection, layout)
+}
+
+pub(crate) fn rewrite_legacy_place_recipe(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+) -> Result<(), TranslateError> {
+    legacy::rewrite_place_recipe(wrapper, connection)
+}
+
+pub(crate) fn rewrite_legacy_seen_recipe(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+) -> Result<(), TranslateError> {
+    legacy::rewrite_seen_recipe(wrapper, connection)
 }
 
 /// Rewrites the recipe display shown when an older client opens a recipe.
@@ -494,6 +526,7 @@ mod tests {
             .write(&mut payload, &"minecraft:stone_crafting_materials".into())
             .unwrap();
         U8.write(&mut payload, &3).unwrap(); // notification + highlight
+        BOOL.write(&mut payload, &true).unwrap(); // replace
         payload
     }
 
@@ -568,11 +601,27 @@ mod tests {
             "minecraft:stone_crafting_materials"
         );
         assert_eq!(U8.read(&mut cursor).unwrap(), 3);
+        assert!(BOOL.read(&mut cursor).unwrap(), "replace flag is preserved");
         assert!(cursor.is_empty());
         assert_eq!(
             translated.packet.to_id(TARGET),
             RECIPE_BOOK_ADD.to_id(TARGET)
         );
+        remove_connection(key);
+    }
+
+    #[test]
+    fn recipe_book_add_keeps_the_trailing_replace_flag() {
+        let key = 0x2623_0010;
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(0)).unwrap();
+        BOOL.write(&mut payload, &false).unwrap();
+        let translated = translate_clientbound(key, TARGET, PLAY, RECIPE_BOOK_ADD.v26_3, &payload)
+            .expect("empty recipe book update is still translated");
+        let mut read = translated.payload.as_slice();
+        assert_eq!(VAR_INT.read(&mut read).unwrap(), VarInt(0));
+        assert!(!BOOL.read(&mut read).unwrap());
+        assert!(read.is_empty());
         remove_connection(key);
     }
 

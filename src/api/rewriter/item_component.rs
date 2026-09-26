@@ -40,21 +40,14 @@ pub fn shape_floor(component: DataComponent) -> V {
         | C::Tool
         | C::CanPlaceOn
         | C::CanBreak
-        | C::IntangibleProjectile
-        | C::Trim
-        | C::Instrument => V::V_1_21_5,
-        C::CustomModelData | C::Food => V::V_1_21_2,
+        | C::IntangibleProjectile => V::V_1_21_5,
+        C::Trim | C::Instrument | C::ProvidesTrimMaterial => V::V_26_3,
+        C::Food => V::V_1_21_2,
+        // The four-array codec arrived in 1.21.4 and is unchanged in later
+        // protocols. Only older layouts use the legacy integer payload.
+        C::CustomModelData => V::V_1_21_4,
         _ => V::V_1_20_5,
     }
-}
-
-/// Core writes these as an inline holder and then no inline data, which no
-/// version can decode.
-const fn is_empty_holder(component: DataComponent) -> bool {
-    matches!(
-        component,
-        DataComponent::Trim | DataComponent::Instrument | DataComponent::ProvidesTrimMaterial
-    )
 }
 
 /// The 26.3 payload of `component` in `target`'s layout, or `None` when it
@@ -69,9 +62,6 @@ pub fn to_version(
     let mapped = map_nested_ids(component, native, target, ids).ok()?;
     if target >= V::V_26_3 {
         return Some(mapped);
-    }
-    if is_empty_holder(component) {
-        return None;
     }
     if target >= shape_floor(component) {
         return Some(mapped);
@@ -107,6 +97,17 @@ fn adapt(
             out
         }
         C::AttributeModifiers => attribute_modifiers(&native, target)?,
+        C::Trim => legacy_trim(&native, target)?,
+        C::Instrument => legacy_instrument(&native, target)?,
+        C::ProvidesTrimMaterial => legacy_provides_trim_material(&native, target)?,
+        C::CustomModelData => {
+            let Some(value) = super::item_nbt::legacy_custom_model_data(&native) else {
+                return Ok(None);
+            };
+            let mut out = Vec::new();
+            out.write_var_int(&VarInt(value)).r()?;
+            out
+        }
         C::Equippable => match equippable(&native, target)? {
             Some(out) => out,
             None => return Ok(None),
@@ -279,6 +280,14 @@ fn map_nested_ids(
 ) -> Result<Vec<u8>, ReadingError> {
     use DataComponent as C;
     match component {
+        C::Trim => map_holder_ids(
+            V::V_26_3,
+            target,
+            native,
+            &["trim_material", "trim_pattern"],
+        ),
+        C::Instrument => map_holder_ids(V::V_26_3, target, native, &["instrument"]),
+        C::ProvidesTrimMaterial => map_holder_ids(V::V_26_3, target, native, &["trim_material"]),
         C::Enchantments | C::StoredEnchantments => enchantment_ids(native, ids),
         C::AttributeModifiers => attribute_ids(native, ids),
         C::MapDecorations if target < V::V_26_3 => map_decoration_types(native),
@@ -292,6 +301,292 @@ fn map_nested_ids(
         C::Container => nested_stacks(native, target, ids, true),
         _ => Ok(native.to_vec()),
     }
+}
+
+fn map_holder_ids(
+    source: V,
+    target: V,
+    payload: &[u8],
+    registry_ids: &[&str],
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = payload;
+    let mut output = Vec::with_capacity(payload.len());
+
+    for registry_id in registry_ids {
+        let source_holder_id = cursor.get_var_int()?.0;
+        let Some(source_id) = source_holder_id.checked_sub(1) else {
+            return Err(ReadingError::Message(format!(
+                "inline {registry_id} data cannot be represented by Pumpkin"
+            )));
+        };
+        let source_name = registry_entry_name(source, registry_id, source_id).ok_or_else(|| {
+            ReadingError::Message(format!(
+                "unknown {source} {registry_id} holder id {source_holder_id}"
+            ))
+        })?;
+        let target_id = registry_entry_id(target, registry_id, source_name)
+            .and_then(|id| id.checked_add(1))
+            .ok_or_else(|| {
+                ReadingError::Message(format!("{target} has no {registry_id} entry {source_name}"))
+            })?;
+        output.write_var_int(&VarInt(target_id)).r()?;
+    }
+
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in registry-backed item component: {}",
+            cursor.len()
+        )));
+    }
+    Ok(output)
+}
+
+/// Rewrites registry ids in a client item component to Pumpkin's 26.3 ids.
+/// Components whose codecs have no nested registry ids pass through unchanged.
+pub fn registry_ids_to_native(
+    component: DataComponent,
+    client: &[u8],
+    version: V,
+) -> Result<Vec<u8>, ReadingError> {
+    use DataComponent as C;
+    let registries = match component {
+        C::Trim => &["trim_material", "trim_pattern"][..],
+        C::Instrument => &["instrument"][..],
+        C::ProvidesTrimMaterial => &["trim_material"][..],
+        _ => return Ok(client.to_vec()),
+    };
+    map_holder_ids(version, V::V_26_3, client, registries)
+}
+
+pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Option<&'static str> {
+    let id = usize::try_from(id).ok()?;
+    if version >= V::V_26_3 {
+        let registry = pumpkin_data::registry::REGISTRY_V_26_3
+            .iter()
+            .find(|registry| registry.registry_id == registry_id)?;
+        return Some(registry.entries.get(id)?.name);
+    }
+    let registry = crate::registry::generated::get_synced(version)?
+        .iter()
+        .find(|registry| registry.registry_id == registry_id)?;
+    Some(registry.entries.get(id)?.name)
+}
+
+pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Option<i32> {
+    let index = if version >= V::V_26_3 {
+        let registry = pumpkin_data::registry::REGISTRY_V_26_3
+            .iter()
+            .find(|registry| registry.registry_id == registry_id)?;
+        registry
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)?
+    } else {
+        let registry = crate::registry::generated::get_synced(version)?
+            .iter()
+            .find(|registry| registry.registry_id == registry_id)?;
+        registry
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)?
+    };
+    i32::try_from(index).ok()
+}
+
+/// The 1.21.4-and-older trim component uses two holders and a tooltip flag.
+/// `map_nested_ids` has already changed the canonical ids into this target's
+/// registry numbering.
+fn legacy_trim(native: &[u8], target: V) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let mut out = Vec::with_capacity(native.len() + 3);
+    for _ in 0..2 {
+        let holder = cursor.get_var_int()?.0;
+        if holder <= 0 {
+            return Err(ReadingError::Message("invalid trim holder id".into()));
+        }
+        out.write_var_int(&VarInt(holder)).r()?;
+    }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "trailing bytes in trim component".into(),
+        ));
+    }
+    if target <= V::V_1_21_4 {
+        out.push(1); // show trim in tooltip
+    }
+    Ok(out)
+}
+
+/// The older Instrument component is a registry holder; 26.3 stores the
+/// vanilla registry entry directly as one VarInt.
+fn legacy_instrument(native: &[u8], target: V) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let holder = cursor.get_var_int()?.0;
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "trailing bytes in instrument component".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(native.len() + 2);
+    if target == V::V_1_21_5 {
+        out.push(1); // the holder arm of the 1.21.5 EitherHolder
+    }
+    out.write_var_int(&VarInt(holder)).r()?;
+    Ok(out)
+}
+
+fn legacy_provides_trim_material(native: &[u8], target: V) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let holder = cursor.get_var_int()?.0;
+    if holder <= 0 || !cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "invalid provides-trim-material holder".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(native.len() + 1);
+    if target == V::V_1_21_5 {
+        out.push(1); // the holder arm of the 1.21.5 EitherHolder
+    }
+    out.write_var_int(&VarInt(holder)).r()?;
+    Ok(out)
+}
+
+/// Converts an older holder layout back to the canonical 26.3 holder ids.
+/// Inline datapack values cannot be represented by Pumpkin's static models.
+pub(crate) fn legacy_registry_component_to_native(
+    component: DataComponent,
+    payload: &mut &[u8],
+    version: V,
+) -> Result<Option<Vec<u8>>, ReadingError> {
+    use DataComponent as C;
+    let registries: &[&str] = match component {
+        C::Trim => &["trim_material", "trim_pattern"],
+        C::Instrument => &["instrument"],
+        C::ProvidesTrimMaterial => &["trim_material"],
+        _ => {
+            return Err(ReadingError::Message(
+                "not a legacy registry component".into(),
+            ));
+        }
+    };
+
+    let mut ids = Vec::with_capacity(registries.len());
+    let mut representable = true;
+    for registry in registries {
+        let either_holder =
+            version == V::V_1_21_5 && matches!(component, C::Instrument | C::ProvidesTrimMaterial);
+        if either_holder && !payload.get_bool()? {
+            let name = payload.get_str()?;
+            let bare = name.strip_prefix("minecraft:").unwrap_or(&name);
+            let native_id = registry_entry_id(V::V_26_3, registry, bare).ok_or_else(|| {
+                ReadingError::Message(format!("26.3 has no {registry} entry {name}"))
+            })?;
+            ids.push(native_id.checked_add(1).ok_or_else(|| {
+                ReadingError::Message(format!("26.3 {registry} holder id overflow"))
+            })?);
+            continue;
+        }
+        let holder_id = payload.get_var_int()?.0;
+        if holder_id == 0 {
+            representable = false;
+            if component == C::Instrument {
+                skip_inline_instrument(payload, version, false)?;
+            } else {
+                skip_inline_registry_value(payload, registry, version)?;
+            }
+            continue;
+        }
+        let source_id = holder_id.checked_sub(1).ok_or_else(|| {
+            ReadingError::Message(format!(
+                "invalid {version} {registry} holder id {holder_id}"
+            ))
+        })?;
+        let name = registry_entry_name(version, registry, source_id).ok_or_else(|| {
+            ReadingError::Message(format!(
+                "unknown {version} {registry} holder id {holder_id}"
+            ))
+        })?;
+        let native_id = registry_entry_id(V::V_26_3, registry, name)
+            .and_then(|id| id.checked_add(1))
+            .ok_or_else(|| ReadingError::Message(format!("26.3 has no {registry} entry {name}")))?;
+        ids.push(native_id);
+    }
+    if component == C::Trim && version <= V::V_1_21_4 {
+        payload.get_bool()?;
+    }
+    if !payload.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in {component:?} component: {}",
+            payload.len()
+        )));
+    }
+    if !representable {
+        return Ok(None);
+    }
+
+    let mut out = Vec::new();
+    for id in ids {
+        out.write_var_int(&VarInt(id)).r()?;
+    }
+    Ok(Some(out))
+}
+
+fn skip_inline_registry_value(
+    payload: &mut &[u8],
+    registry: &str,
+    version: V,
+) -> Result<(), ReadingError> {
+    payload.get_str()?;
+    if registry == "trim_pattern" {
+        if version < V::V_1_21_5 {
+            payload.get_var_int()?; // item id
+        }
+        payload.get_nbt(&version)?;
+        payload.get_bool()?; // decal
+        return Ok(());
+    }
+    if version < V::V_1_21_5 {
+        payload.get_var_int()?; // item id
+    }
+    if version <= V::V_1_21_2 {
+        payload.get_f32_be()?; // item model index
+    }
+    let count = payload.get_var_int()?.0;
+    if !(0..=4096).contains(&count) {
+        return Err(ReadingError::Message(
+            "registry override count out of bounds".into(),
+        ));
+    }
+    for _ in 0..count {
+        if version <= V::V_1_21_1 {
+            payload.get_var_int()?; // numeric armor-material id
+        } else {
+            payload.get_str()?;
+        }
+        payload.get_str()?;
+    }
+    payload.get_nbt(&version)?;
+    Ok(())
+}
+
+fn skip_inline_instrument(
+    payload: &mut &[u8],
+    version: V,
+    has_durability_damage: bool,
+) -> Result<(), ReadingError> {
+    if payload.get_var_int()?.0 == 0 {
+        payload.get_str()?;
+        if payload.get_bool()? {
+            payload.get_f32_be()?;
+        }
+    }
+    payload.get_f32_be()?;
+    payload.get_f32_be()?;
+    if has_durability_damage {
+        payload.get_var_int()?;
+    }
+    payload.get_nbt(&version)?;
+    Ok(())
 }
 
 /// ViaBackwards downgrades the five 26.3-only map decoration types to the
@@ -556,17 +851,332 @@ mod tests {
         );
     }
 
-    /// Core writes both as an inline holder with no inline data.
     #[test]
-    fn trim_and_instrument_never_reach_an_older_client() {
+    fn trim_instrument_and_material_holder_ids_map_by_registry_name() {
+        let target = V::V_1_21_5;
+        let ids = crate::api::MappingData::get().composed(target);
+        let mut native_trim = Vec::new();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            VAR_INT
+                .write(
+                    &mut native_trim,
+                    &VarInt(registry_value_id(V::V_26_3, registry, name) + 1),
+                )
+                .unwrap();
+        }
+        let mut expected_trim = Vec::new();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            VAR_INT
+                .write(
+                    &mut expected_trim,
+                    &VarInt(registry_value_id(target, registry, name) + 1),
+                )
+                .unwrap();
+        }
         assert_eq!(
-            to_version(DataComponent::Trim, &[0, 0], V::V_1_21_5, ids()),
-            None
+            to_version(DataComponent::Trim, &native_trim, target, ids),
+            Some(expected_trim.clone())
         );
         assert_eq!(
-            to_version(DataComponent::Instrument, &[0], V::V_26_2, ids()),
+            registry_ids_to_native(DataComponent::Trim, &expected_trim, target).unwrap(),
+            native_trim
+        );
+
+        let instrument = registry_value_id(V::V_26_3, "instrument", "ponder_goat_horn");
+        let mut native_instrument = Vec::new();
+        VAR_INT
+            .write(&mut native_instrument, &VarInt(instrument + 1))
+            .unwrap();
+        let mapped_instrument =
+            to_version(DataComponent::Instrument, &native_instrument, target, ids).unwrap();
+        let mut expected_instrument = Vec::new();
+        expected_instrument.push(1); // holder arm in 1.21.5+
+        VAR_INT
+            .write(
+                &mut expected_instrument,
+                &VarInt(registry_value_id(target, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        assert_eq!(mapped_instrument, expected_instrument);
+        let mut instrument_payload = expected_instrument.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(
+                DataComponent::Instrument,
+                &mut instrument_payload,
+                target,
+            )
+            .unwrap(),
+            Some(native_instrument)
+        );
+
+        let target = V::V_1_21_5;
+        let ids = crate::api::MappingData::get().composed(target);
+        let material = registry_value_id(V::V_26_3, "trim_material", "redstone");
+        let mut native_material = Vec::new();
+        VAR_INT
+            .write(&mut native_material, &VarInt(material + 1))
+            .unwrap();
+        let mapped_material = to_version(
+            DataComponent::ProvidesTrimMaterial,
+            &native_material,
+            target,
+            ids,
+        )
+        .unwrap();
+        let mut expected_material = Vec::new();
+        expected_material.push(1); // holder arm in the 1.21.5 EitherHolder
+        VAR_INT
+            .write(
+                &mut expected_material,
+                &VarInt(registry_value_id(target, "trim_material", "redstone") + 1),
+            )
+            .unwrap();
+        assert_eq!(mapped_material, expected_material);
+        let mut material_payload = expected_material.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(
+                DataComponent::ProvidesTrimMaterial,
+                &mut material_payload,
+                target,
+            )
+            .unwrap(),
+            Some(native_material)
+        );
+    }
+
+    #[test]
+    fn legacy_trim_and_instrument_holders_round_trip_for_1_21_4() {
+        let target = V::V_1_21_4;
+        let ids = crate::api::MappingData::get().composed(target);
+        let mut native_trim = Vec::new();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            VAR_INT
+                .write(
+                    &mut native_trim,
+                    &VarInt(registry_value_id(V::V_26_3, registry, name) + 1),
+                )
+                .unwrap();
+        }
+        let legacy_trim = to_version(DataComponent::Trim, &native_trim, target, ids).unwrap();
+        let mut read = legacy_trim.as_slice();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            assert_eq!(
+                read.get_var_int().unwrap().0,
+                registry_value_id(target, registry, name) + 1
+            );
+        }
+        assert!(read.get_bool().unwrap(), "trim remains visible in tooltips");
+        assert!(read.is_empty());
+        let mut trim_payload = legacy_trim.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(DataComponent::Trim, &mut trim_payload, target,)
+                .unwrap(),
+            Some(native_trim)
+        );
+
+        let mut native_instrument = Vec::new();
+        VAR_INT
+            .write(
+                &mut native_instrument,
+                &VarInt(registry_value_id(V::V_26_3, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        let legacy_instrument =
+            to_version(DataComponent::Instrument, &native_instrument, target, ids).unwrap();
+        let mut read = legacy_instrument.as_slice();
+        assert_eq!(
+            read.get_var_int().unwrap().0,
+            registry_value_id(target, "instrument", "ponder_goat_horn") + 1
+        );
+        assert!(read.is_empty());
+        let mut instrument_payload = legacy_instrument.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(
+                DataComponent::Instrument,
+                &mut instrument_payload,
+                target,
+            )
+            .unwrap(),
+            Some(native_instrument)
+        );
+
+        let target = V::V_1_21_5;
+        let mut native_instrument = Vec::new();
+        VAR_INT
+            .write(
+                &mut native_instrument,
+                &VarInt(registry_value_id(V::V_26_3, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        let mut string_arm = vec![0]; // direct resource-location arm
+        string_arm
+            .write_string("minecraft:ponder_goat_horn")
+            .unwrap();
+        let mut string_payload = string_arm.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(
+                DataComponent::Instrument,
+                &mut string_payload,
+                target,
+            )
+            .unwrap(),
+            Some(native_instrument)
+        );
+
+        let target = V::V_26_2;
+        let ids = crate::api::MappingData::get().composed(target);
+        let mut native_instrument = Vec::new();
+        VAR_INT
+            .write(
+                &mut native_instrument,
+                &VarInt(registry_value_id(V::V_26_3, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        let encoded =
+            to_version(DataComponent::Instrument, &native_instrument, target, ids).unwrap();
+        let mut expected = Vec::new();
+        VAR_INT
+            .write(
+                &mut expected,
+                &VarInt(registry_value_id(target, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        assert_eq!(
+            encoded, expected,
+            "26.2 uses a holder directly, without the 1.21.5 EitherHolder flag"
+        );
+
+        let mut native_trim = Vec::new();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            VAR_INT
+                .write(
+                    &mut native_trim,
+                    &VarInt(registry_value_id(V::V_26_3, registry, name) + 1),
+                )
+                .unwrap();
+        }
+        let encoded = to_version(DataComponent::Trim, &native_trim, target, ids).unwrap();
+        let mut expected = Vec::new();
+        for (registry, name) in [("trim_material", "iron"), ("trim_pattern", "coast")] {
+            VAR_INT
+                .write(
+                    &mut expected,
+                    &VarInt(registry_value_id(target, registry, name) + 1),
+                )
+                .unwrap();
+        }
+        assert_eq!(encoded, expected, "26.2 trim has no tooltip boolean");
+
+        let native_material = {
+            let mut bytes = Vec::new();
+            VAR_INT
+                .write(
+                    &mut bytes,
+                    &VarInt(registry_value_id(V::V_26_3, "trim_material", "redstone") + 1),
+                )
+                .unwrap();
+            bytes
+        };
+        let encoded = to_version(
+            DataComponent::ProvidesTrimMaterial,
+            &native_material,
+            target,
+            ids,
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        VAR_INT
+            .write(
+                &mut expected,
+                &VarInt(registry_value_id(target, "trim_material", "redstone") + 1),
+            )
+            .unwrap();
+        assert_eq!(
+            encoded, expected,
+            "26.2 uses a holder directly for provides_trim_material"
+        );
+    }
+
+    #[test]
+    fn custom_model_data_downgrades_only_a_single_whole_float_before_1_21_4() {
+        let mut native = vec![1];
+        native.extend(7.0f32.to_bits().to_be_bytes());
+        native.extend([0, 0, 0]);
+        let expected = {
+            let mut value = Vec::new();
+            VAR_INT.write(&mut value, &VarInt(7)).unwrap();
+            value
+        };
+        assert_eq!(
+            to_version(DataComponent::CustomModelData, &native, V::V_1_21_2, ids()),
+            Some(expected)
+        );
+        assert_eq!(
+            to_version(DataComponent::CustomModelData, &native, V::V_1_21_5, ids()),
+            Some(native.clone())
+        );
+        assert_eq!(
+            to_version(DataComponent::CustomModelData, &native, V::V_1_21_4, ids()),
+            Some(native.clone())
+        );
+
+        let mut fractional = vec![1];
+        fractional.extend(7.5f32.to_bits().to_be_bytes());
+        fractional.extend([0, 0, 0]);
+        assert_eq!(
+            to_version(
+                DataComponent::CustomModelData,
+                &fractional,
+                V::V_1_21_2,
+                ids()
+            ),
             None
         );
+    }
+
+    #[test]
+    fn an_unknown_source_registry_id_fails_closed() {
+        let target = V::V_26_2;
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(127)).unwrap();
+        VAR_INT
+            .write(
+                &mut payload,
+                &VarInt(registry_value_id(V::V_26_3, "trim_pattern", "coast")),
+            )
+            .unwrap();
+        assert_eq!(
+            to_version(
+                DataComponent::Trim,
+                &payload,
+                target,
+                crate::api::MappingData::get().composed(target),
+            ),
+            None
+        );
+    }
+
+    fn registry_value_id(version: V, registry_id: &str, name: &str) -> i32 {
+        let index = if version >= V::V_26_3 {
+            pumpkin_data::registry::REGISTRY_V_26_3
+                .iter()
+                .find(|registry| registry.registry_id == registry_id)
+                .unwrap()
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+        } else {
+            crate::registry::generated::get_synced(version)
+                .unwrap()
+                .iter()
+                .find(|registry| registry.registry_id == registry_id)
+                .unwrap()
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+        }
+        .unwrap();
+        i32::try_from(index).unwrap()
     }
 
     #[test]

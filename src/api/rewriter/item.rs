@@ -272,14 +272,35 @@ fn read_client_payload(
         )?));
     }
     if version >= item_component::shape_floor(component) {
-        let len = component_payload_len(i32::from(component.to_id()), r)?;
+        let len = if length_prefixed {
+            component_payload_len(i32::from(component.to_id()), r)?
+        } else {
+            super::item_shape::payload_len_for_version(i32::from(component.to_id()), r, version)?
+        };
         let native = r.read_slice_borrowed(len)?.to_vec();
-        return Ok(Some(match component {
+        let native = match component {
             C::Enchantments | C::StoredEnchantments => native_enchantments(&native, enchantments)?,
-            _ => native,
-        }));
+            _ => item_component::registry_ids_to_native(component, &native, version)?,
+        };
+        return Ok(Some(native));
     }
     match component {
+        C::Trim | C::Instrument | C::ProvidesTrimMaterial => {
+            item_component::legacy_registry_component_to_native(component, r, version)
+        }
+        C::CustomModelData => {
+            let value = r.get_var_int()?.0;
+            let mut out = Vec::new();
+            out.write_var_int(&VarInt(1))
+                .map_err(|error| ReadingError::Message(error.to_string()))?;
+            out.write_f32_be(value as f32)
+                .map_err(|error| ReadingError::Message(error.to_string()))?;
+            for _ in 0..3 {
+                out.write_var_int(&VarInt(0))
+                    .map_err(|error| ReadingError::Message(error.to_string()))?;
+            }
+            Ok(Some(out))
+        }
         C::Unbreakable => {
             r.get_bool()?;
             Ok(Some(Vec::new()))
@@ -618,6 +639,34 @@ pub fn rewrite_item_value(input: &mut &[u8], layout: V, ids: &ComposedMappings) 
     let item = StructuredItemRewriter::to_version(&item, layout, ids);
     let mut out = Vec::new();
     ItemT::for_version(layout).write(&mut out, &item).ok()?;
+    Some(out)
+}
+
+/// Rewrites a nested server stack and records any components the client cannot
+/// express, using the same per-connection backup path as inventory slots.
+#[must_use]
+pub fn rewrite_item_value_with_connection(
+    input: &mut &[u8],
+    layout: V,
+    ids: &ComposedMappings,
+    connection: &mut UserConnection,
+) -> Option<Vec<u8>> {
+    let source_ids = MappingData::get().composed(V::V_26_3);
+    let original = ClientboundItemT::new(V::V_26_3, source_ids)
+        .read(input)
+        .ok()?;
+    let mut downgraded = StructuredItemRewriter::to_version(&original, layout, ids);
+    super::item_backup::backup_clientbound_item(
+        connection,
+        &original,
+        &mut downgraded,
+        layout,
+        ids,
+    );
+    let mut out = Vec::new();
+    ItemT::for_version(layout)
+        .write(&mut out, &downgraded)
+        .ok()?;
     Some(out)
 }
 
@@ -1040,6 +1089,55 @@ mod tests {
             Vec::<u8>::new(),
             "unbreakable is empty again"
         );
+    }
+
+    #[test]
+    fn a_1_21_4_custom_model_arrays_are_read_without_a_length_prefix() {
+        let source = V::V_1_21_4;
+        let mappings = ids(source);
+        let component_id = map(
+            &mappings.data_component_type,
+            i32::from(DataComponent::CustomModelData.to_id()),
+        )
+        .unwrap();
+        let mut bytes = vec![1]; // stack count
+        VAR_INT
+            .write(
+                &mut bytes,
+                &VarInt(
+                    map(
+                        &mappings.items,
+                        i32::from(pumpkin_data::item::Item::PAPER.id),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        VAR_INT.write(&mut bytes, &VarInt(1)).unwrap(); // added component count
+        VAR_INT.write(&mut bytes, &VarInt(component_id)).unwrap();
+        let mut custom_model_data = Vec::new();
+        VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // floats
+        custom_model_data.write_f32_be(7.5).unwrap();
+        VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // flags
+        custom_model_data.write_bool(true).unwrap();
+        VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // strings
+        custom_model_data.write_string("model").unwrap();
+        VAR_INT.write(&mut custom_model_data, &VarInt(1)).unwrap(); // colors
+        custom_model_data.write_i32_be(0x1234_5678).unwrap();
+        bytes.extend(custom_model_data.clone());
+        VAR_INT.write(&mut bytes, &VarInt(0)).unwrap(); // removed component count
+
+        let mut read = bytes.as_slice();
+        let item = read_client_item(&mut read, source, false, mappings).unwrap();
+        assert!(read.is_empty());
+        let Item::Structured { added, .. } = item else {
+            panic!("structured item");
+        };
+        let data = added
+            .iter()
+            .find(|entry| entry.id == i32::from(DataComponent::CustomModelData.to_id()))
+            .expect("custom model data component");
+        assert_eq!(data.data, custom_model_data);
     }
 
     /// The 1.21.5 creative slot sends every payload with its own length.

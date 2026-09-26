@@ -1,5 +1,7 @@
 use crate::api::types::{BOOL, I8, STRING, U8, VAR_INT};
-use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
+use crate::api::{
+    Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
+};
 use crate::packet::chunk_legacy;
 use crate::packet::mappings::clientbound;
 use crate::packet::mappings::serverbound;
@@ -51,9 +53,26 @@ fn chunk(
         connection.entity_tracker.min_y,
         &ctx.mappings.blockstates,
         ctx.layout,
+        connection.version,
     )
     .ok_or(TranslateError::Unsupported("chunk"))?;
-    wrapper.replace_remaining(out);
+    let chunk = if connection.version < JavaMinecraftVersion::V_1_17 {
+        chunk_legacy::to_v1_16(
+            &out.chunk,
+            &MappingData::get()
+                .step(JavaMinecraftVersion::V_1_17)
+                .blockstates,
+        )
+        .ok_or(TranslateError::Unsupported("1.16 chunk"))?
+    } else {
+        out.chunk
+    };
+
+    // Extras can be ordered differently by host paths. Cancel the original
+    // and emit both packets in order so light always precedes its chunk.
+    wrapper.send_extra(&clientbound::play::LIGHT_UPDATE, out.light_update);
+    wrapper.send_extra(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk);
+    wrapper.cancel();
     Ok(())
 }
 #[cfg(test)]

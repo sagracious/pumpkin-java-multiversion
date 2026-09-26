@@ -10,7 +10,9 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::ComposedMappings;
-use crate::api::rewriter::item_component::legacy_modifier_uuid;
+use crate::api::rewriter::item_component::{
+    legacy_modifier_uuid, registry_entry_id, registry_entry_name,
+};
 use crate::api::types::ItemComponent;
 use crate::data::entity_types::stand_in_type_for_version;
 
@@ -507,7 +509,7 @@ fn var_int_pairs(bytes: &[u8]) -> Option<Vec<(i32, i32)>> {
 
 /// The single int a legacy `CustomModelData` tag holds, if the 26.3 component
 /// holds exactly that and nothing else.
-fn legacy_custom_model_data(bytes: &[u8]) -> Option<i32> {
+pub(crate) fn legacy_custom_model_data(bytes: &[u8]) -> Option<i32> {
     let mut r = bytes;
     if r.get_var_int().ok()?.0 != 1 {
         return None;
@@ -517,6 +519,9 @@ fn legacy_custom_model_data(bytes: &[u8]) -> Option<i32> {
         if r.get_var_int().ok()?.0 != 0 {
             return None;
         }
+    }
+    if !r.is_empty() {
+        return None;
     }
     let rounded = value as i32;
     (value == rounded as f32).then_some(rounded)
@@ -699,13 +704,30 @@ pub fn components_to_nbt(
                 }
             }
             DataComponent::Trim => {
-                // Armour trims arrive in 1.20, and core writes the payload as
-                // two empty holders, so the tag can only be a placeholder.
-                if version >= V::V_1_20 {
+                if version >= V::V_1_20
+                    && let (Ok(material), Ok(pattern)) = (r.get_var_int(), r.get_var_int())
+                    && let (Some(material), Some(pattern)) =
+                        (material.0.checked_sub(1), pattern.0.checked_sub(1))
+                    && r.is_empty()
+                    && let (Some(material), Some(pattern)) = (
+                        registry_entry_name(V::V_26_3, "trim_material", material),
+                        registry_entry_name(V::V_26_3, "trim_pattern", pattern),
+                    )
+                {
                     let mut trim = NbtCompound::new();
-                    trim.put("material", NbtTag::String("minecraft:quartz".into()));
-                    trim.put("pattern", NbtTag::String("minecraft:coast".into()));
+                    trim.put_string("material", format!("minecraft:{material}"));
+                    trim.put_string("pattern", format!("minecraft:{pattern}"));
                     root.put_compound("Trim", trim);
+                }
+            }
+            DataComponent::Instrument => {
+                if let Ok(holder) = r.get_var_int()
+                    && let Some(registry_id) = holder.0.checked_sub(1)
+                    && let Some(instrument) =
+                        registry_entry_name(V::V_26_3, "instrument", registry_id)
+                    && r.is_empty()
+                {
+                    root.put_string("instrument", format!("minecraft:{instrument}"));
                 }
             }
             DataComponent::WrittenBookContent => {
@@ -832,6 +854,7 @@ fn var_int(value: i32) -> Vec<u8> {
 #[allow(clippy::too_many_lines)]
 pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
     let mut out = Vec::new();
+    let mut consumed_instrument = false;
 
     if let Some(damage) = nbt.get("Damage").and_then(extract_int_like) {
         out.push(component(DataComponent::Damage, var_int(damage)));
@@ -914,8 +937,30 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
             out.push(component(DataComponent::BlockEntityData, data));
         }
     }
-    if nbt.get_compound("Trim").is_some() {
-        out.push(component(DataComponent::Trim, vec![0, 0]));
+    if let Some(trim) = nbt.get_compound("Trim")
+        && let (Some(material), Some(pattern)) = (
+            trim.get_string("material")
+                .map(|name| name.strip_prefix("minecraft:").unwrap_or(name)),
+            trim.get_string("pattern")
+                .map(|name| name.strip_prefix("minecraft:").unwrap_or(name)),
+        )
+        && let (Some(material), Some(pattern)) = (
+            registry_entry_id(V::V_26_3, "trim_material", material),
+            registry_entry_id(V::V_26_3, "trim_pattern", pattern),
+        )
+    {
+        let mut data = var_int(material + 1);
+        data.extend(var_int(pattern + 1));
+        out.push(component(DataComponent::Trim, data));
+    }
+    if let Some(instrument) = nbt.get_string("instrument") {
+        let instrument = instrument.strip_prefix("minecraft:").unwrap_or(instrument);
+        if let Some(registry_id) = registry_entry_id(V::V_26_3, "instrument", instrument)
+            && let Some(holder_id) = registry_id.checked_add(1)
+        {
+            out.push(component(DataComponent::Instrument, var_int(holder_id)));
+            consumed_instrument = true;
+        }
     }
     let pages: Vec<String> = nbt
         .get_list("pages")
@@ -999,7 +1044,9 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
     // identified by a resource id a string off the wire cannot become.
     let mut custom = NbtCompound::new();
     for (name, tag) in &nbt.child_tags {
-        if !CONSUMED_ROOT_TAGS.contains(&name.as_ref()) {
+        if !CONSUMED_ROOT_TAGS.contains(&name.as_ref())
+            && !(consumed_instrument && name.as_ref() == "instrument")
+        {
             custom.put(name, tag.clone());
         }
     }
@@ -1154,6 +1201,49 @@ mod tests {
         assert_eq!(
             var_int_pairs(enchantments).unwrap(),
             vec![(i32::from(sharpness.id), 4)]
+        );
+    }
+
+    #[test]
+    fn armor_trim_registry_values_round_trip_through_legacy_nbt() {
+        let material = registry_entry_id(V::V_26_3, "trim_material", "iron").unwrap();
+        let pattern = registry_entry_id(V::V_26_3, "trim_pattern", "coast").unwrap();
+        let mut trim_data = var_int(material + 1);
+        trim_data.extend(var_int(pattern + 1));
+        let added = vec![component(DataComponent::Trim, trim_data)];
+
+        let nbt = components_to_nbt(&added, V::V_1_20_3, ids()).unwrap();
+        let trim = nbt.get_compound("Trim").unwrap();
+        assert_eq!(trim.get_string("material"), Some("minecraft:iron"));
+        assert_eq!(trim.get_string("pattern"), Some("minecraft:coast"));
+
+        let back = nbt_to_components(&nbt, V::V_1_20_3);
+        let data = find(&back, DataComponent::Trim).unwrap();
+        let mut read = data;
+        assert_eq!(read.get_var_int().unwrap().0, material + 1);
+        assert_eq!(read.get_var_int().unwrap().0, pattern + 1);
+        assert!(read.is_empty());
+    }
+
+    #[test]
+    fn goat_horn_instrument_round_trips_through_legacy_nbt() {
+        let registry_id = registry_entry_id(V::V_26_3, "instrument", "ponder_goat_horn").unwrap();
+        let holder_id = registry_id + 1;
+        let component = component(DataComponent::Instrument, var_int(holder_id));
+
+        let nbt = components_to_nbt(&[component], V::V_1_19, ids()).unwrap();
+        assert_eq!(
+            nbt.get_string("instrument"),
+            Some("minecraft:ponder_goat_horn")
+        );
+
+        let back = nbt_to_components(&nbt, V::V_1_19);
+        let instrument = find(&back, DataComponent::Instrument).unwrap();
+        assert_eq!(instrument, var_int(holder_id).as_slice());
+        let custom_data = find(&back, DataComponent::CustomData);
+        assert!(
+            custom_data.is_none(),
+            "recognized instrument is not custom data"
         );
     }
 

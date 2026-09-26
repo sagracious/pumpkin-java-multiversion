@@ -23,7 +23,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  PUMPKIN_COMMIT: 4895a26cc76abcefade76223da9380d78565701b
+  PUMPKIN_COMMIT: 94bb6be357b2c8c19ce3294e359bee2b75d7a2e5
   PUMPKIN_TAG: 0.2.0+26.3-26.51
 
 jobs:
@@ -40,7 +40,6 @@ jobs:
           repository: sagracious/Pumpkin
           ref: ${{ env.PUMPKIN_COMMIT }}
           path: Pumpkin
-          submodules: recursive
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
@@ -61,7 +60,10 @@ jobs:
           src/api/entity_data.rs
           src/api/rewriter/command.rs
           src/api/rewriter/entity.rs
+          src/api/rewriter/item.rs
+          src/api/rewriter/item_nbt.rs
           src/api/rewriter/particle.rs
+          src/api/rewriter/sound.rs
           src/api/rewriter/screen.rs
           src/data/entity_data_types.rs
           src/data/entity_types.rs
@@ -69,7 +71,11 @@ jobs:
           src/data/tracked_index.rs
           src/packet/join.rs
           src/packet/recipe_book.rs
+          src/packet/recipe_legacy.rs
           src/packet/chunk_remap.rs
+          src/packet/chunk_legacy.rs
+          src/packet/update_tags.rs
+          src/pipeline/id_pass.rs
           src/protocol/mod.rs
           src/protocol/v1_12_1to1_12.rs
           src/protocol/v1_12_2to1_12_1.rs
@@ -89,6 +95,7 @@ jobs:
           src/protocol/v1_16_2to1_16_1.rs
           src/protocol/v1_16_4to1_16_3.rs
           src/protocol/v1_16to1_15_2.rs
+          src/protocol/v1_18to1_17_1.rs
           src/protocol/v26_1to1_21_11.rs
           src/protocol/v26_2to26_1.rs
           src/protocol/v26_3to26_2.rs
@@ -103,7 +110,6 @@ jobs:
       - name: Build WASM
         working-directory: pumpkin-java-multiversion
         run: |
-          cargo generate-lockfile
           cargo test --lib --locked
           cargo build --release --locked --target wasm32-wasip2
       - name: Package artifact

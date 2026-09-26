@@ -92,9 +92,18 @@ fn mapper(registry: &str) -> Option<fn(u16, JavaMinecraftVersion) -> Option<u16>
     match registry {
         "block" => Some(block_id_for_version),
         "item" => Some(item_id_for_version),
+        "enchantment" => Some(enchantment_id_for_version),
         "entity_type" => Some(entity_type_id_for_version),
         _ => None,
     }
+}
+
+fn enchantment_id_for_version(id: u16, version: JavaMinecraftVersion) -> Option<u16> {
+    let mapped = crate::api::MappingData::get()
+        .composed(version)
+        .enchantments
+        .map(u32::from(id))?;
+    u16::try_from(mapped).ok()
 }
 
 /// Tags `version`'s datapack has that 26.3 dropped, minus any the server sent anyway.
@@ -295,5 +304,35 @@ mod tests {
         assert_eq!(&*cursor.get_str().unwrap(), "minecraft:block");
         read_tags(&mut cursor).expect("tag list");
         assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn enchantment_tag_members_use_the_target_registry_ids() {
+        use pumpkin_data::enchantment::Enchantment;
+
+        let version = JavaMinecraftVersion::V_1_20_5;
+        let breach = u16::from(Enchantment::from_name("breach").unwrap().id);
+        assert!(
+            crate::api::MappingData::get()
+                .composed(version)
+                .enchantments
+                .map(u32::from(breach))
+                .is_none(),
+            "breach is absent from 1.20.5"
+        );
+
+        let mut payload = Vec::new();
+        payload.write_var_int(&VarInt(1)).unwrap();
+        payload.write_string("minecraft:enchantment").unwrap();
+        write_tag_list(
+            &mut payload,
+            &[("minecraft:exclusive_set", &[i32::from(breach)])],
+        );
+        let out = rewrite_update_tags(&payload, version).expect("rewritten");
+        let groups = read_groups(&out).expect("named tag groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].registry, "minecraft:enchantment");
+        assert_eq!(groups[0].tags.len(), 1);
+        assert!(groups[0].tags[0].ids.is_empty());
     }
 }

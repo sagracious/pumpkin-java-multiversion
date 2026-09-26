@@ -8,7 +8,9 @@ use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::connection::GameTimeStorage;
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
-use crate::api::rewriter::particle::{ParticleData, write_particle};
+use crate::api::rewriter::particle::{
+    ParticleData, write_particle, write_particle_with_connection,
+};
 use crate::api::types::{VAR_INT, VAR_LONG, WireType};
 use crate::api::{MappingData, PacketWrapper, TranslateError, UserConnection};
 use crate::data::entity_data_types::{
@@ -60,6 +62,7 @@ fn rewrite_entries(
     entries: &[EntityDataEntry],
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
+    mut connection: Option<&mut UserConnection>,
     game_time: i64,
 ) -> Vec<EntityDataEntry> {
     let mut rewritten = Vec::with_capacity(entries.len() + 1);
@@ -73,10 +76,13 @@ fn rewrite_entries(
             && entry.index == 10
             && let MetaValue::Particle(particle) = &entry.value
             && particle.id == i32::from(pumpkin_data::particle::Particle::EntityEffect.to_id())
-            && let ParticleData::Color(color) = particle.data
+            && let ParticleData::Color(color) = &particle.data
         {
             let mut value = Vec::new();
-            if VAR_INT.write(&mut value, &VarInt(color)).is_err() {
+            if VAR_INT
+                .write(&mut value, &VarInt(*color & 0x00ff_ffff))
+                .is_err()
+            {
                 continue;
             }
             if let Some(serializer) = meta_data_type_id_for_name("int", layout) {
@@ -104,9 +110,14 @@ fn rewrite_entries(
         let Some(index) = tracked_index_for_version(client_entity_type, entry.index, layout) else {
             continue;
         };
-        let Some((serializer, value)) =
-            rewrite_entry_value(server_entity_type, entry, layout, ids, game_time)
-        else {
+        let Some((serializer, value)) = rewrite_entry_value(
+            server_entity_type,
+            entry,
+            layout,
+            ids,
+            connection.as_deref_mut(),
+            game_time,
+        ) else {
             continue;
         };
         rewritten.push(EntityDataEntry {
@@ -143,6 +154,7 @@ fn rewrite_entry_value(
     entry: &EntityDataEntry,
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
+    connection: Option<&mut UserConnection>,
     game_time: i64,
 ) -> Option<(i32, MetaValue)> {
     let anger_time = (entity_type == pumpkin_data::entity::EntityType::WOLF.id
@@ -175,7 +187,7 @@ fn rewrite_entry_value(
 
     Some((
         meta_data_type_id_for_version(entry.serializer, layout)?,
-        rewrite_value(&entry.value, layout, ids)?,
+        rewrite_value(&entry.value, layout, ids, connection)?,
     ))
 }
 
@@ -183,6 +195,7 @@ fn rewrite_value(
     value: &MetaValue,
     layout: JavaMinecraftVersion,
     ids: &ComposedMappings,
+    mut connection: Option<&mut UserConnection>,
 ) -> Option<MetaValue> {
     Some(match value {
         // Entity metadata is decoded in Pumpkin's native 26.3 form before
@@ -190,7 +203,12 @@ fn rewrite_value(
         MetaValue::Raw(_) => value.clone(),
         MetaValue::Item(bytes) => {
             let mut input = bytes.as_slice();
-            let item = crate::api::rewriter::item::rewrite_item_value(&mut input, layout, ids)?;
+            let item = match connection.as_deref_mut() {
+                Some(connection) => crate::api::rewriter::item::rewrite_item_value_with_connection(
+                    &mut input, layout, ids, connection,
+                )?,
+                None => crate::api::rewriter::item::rewrite_item_value(&mut input, layout, ids)?,
+            };
             if !input.is_empty() {
                 return None;
             }
@@ -207,7 +225,14 @@ fn rewrite_value(
         // particle the client cannot show leaves the whole entry out.
         MetaValue::Particle(particle) => {
             let mut out = Vec::new();
-            if !write_particle(&mut out, particle, layout, ids).ok()? {
+            let written = match connection.as_deref_mut() {
+                Some(connection) => {
+                    write_particle_with_connection(&mut out, particle, layout, ids, connection)
+                }
+                None => write_particle(&mut out, particle, layout, ids),
+            }
+            .ok()?;
+            if !written {
                 return None;
             }
             MetaValue::Raw(out)
@@ -217,7 +242,14 @@ fn rewrite_value(
             let mut kept = 0;
             for particle in particles {
                 let mut one = Vec::new();
-                if write_particle(&mut one, particle, layout, ids).ok()? {
+                let written = match connection.as_deref_mut() {
+                    Some(connection) => {
+                        write_particle_with_connection(&mut one, particle, layout, ids, connection)
+                    }
+                    None => write_particle(&mut one, particle, layout, ids),
+                }
+                .ok()?;
+                if written {
                     body.extend(one);
                     kept += 1;
                 }
@@ -273,7 +305,15 @@ pub fn set_entity_data(
     let entries = source_type
         .zip(client_type)
         .map(|(server_type, client_type)| {
-            rewrite_entries(server_type, client_type, &entries, layout, ids, game_time)
+            rewrite_entries(
+                server_type,
+                client_type,
+                &entries,
+                layout,
+                ids,
+                Some(connection),
+                game_time,
+            )
         })
         .unwrap_or_default();
     wrapper.write(&EntityDataListT::for_version(layout), &entries)
@@ -485,6 +525,7 @@ mod tests {
             &entries,
             V::V_1_20_3,
             MappingData::get().composed(V::V_1_20_3),
+            None,
             0,
         );
         assert_eq!(
@@ -502,7 +543,7 @@ mod tests {
             panic!("legacy cloud color is a varint");
         };
         let mut color_reader = color.as_slice();
-        assert_eq!(VAR_INT.read(&mut color_reader).unwrap().0, 0x1122_3344);
+        assert_eq!(VAR_INT.read(&mut color_reader).unwrap().0, 0x0022_3344);
         assert!(color_reader.is_empty());
         assert_eq!(
             before_1_20_5[2].serializer,
@@ -520,6 +561,7 @@ mod tests {
             &entries,
             V::V_1_20_5,
             MappingData::get().composed(V::V_1_20_5),
+            None,
             0,
         );
         assert_eq!(at_1_20_5[1].index, 9);
@@ -748,9 +790,13 @@ mod tests {
             .particles
             .map(u32::from(Particle::EntityEffect.to_id()))
             .unwrap();
-        let MetaValue::Raw(rewritten) =
-            rewrite_value(&MetaValue::Particles(vec![effect, geyser]), layout, ids).unwrap()
-        else {
+        let MetaValue::Raw(rewritten) = rewrite_value(
+            &MetaValue::Particles(vec![effect, geyser]),
+            layout,
+            ids,
+            None,
+        )
+        .unwrap() else {
             panic!("particle list is emitted as wire bytes");
         };
         assert_eq!(
@@ -877,11 +923,12 @@ mod anger_time_tests {
 mod cushion_and_nested_item_tests {
     use super::*;
     use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
-    use crate::api::types::{Item as WireItem, ItemComponent, ItemT, VAR_INT};
+    use crate::api::rewriter::item::ClientboundItemT;
+    use crate::api::rewriter::item_backup::restore_full_item;
+    use crate::api::types::{Item as WireItem, ItemComponent, ItemT};
     use crate::data::entity_data_types::meta_data_type_id_for_name;
     use pumpkin_data::data_component::DataComponent;
     use pumpkin_data::entity::EntityType;
-    use pumpkin_protocol::codec::var_int::VarInt;
     use pumpkin_protocol::ser::NetworkWriteExt;
     use pumpkin_util::version::JavaMinecraftVersion as V;
 
@@ -903,6 +950,7 @@ mod cushion_and_nested_item_tests {
             &entries,
             V::V_26_2,
             ids,
+            None,
             0,
         );
         assert_eq!(
@@ -916,15 +964,13 @@ mod cushion_and_nested_item_tests {
 
     #[test]
     fn item_inside_entity_metadata_uses_the_structured_rewriter() {
-        let mut animation = Vec::new();
-        VAR_INT.write(&mut animation, &VarInt(1)).unwrap(); // swing kind
-        VAR_INT.write(&mut animation, &VarInt(6)).unwrap(); // duration
+        let target = V::V_1_21_4;
         let item = WireItem::Structured {
             count: 1,
             id: i32::from(pumpkin_data::item::Item::DIAMOND.id),
             added: vec![ItemComponent {
-                id: i32::from(DataComponent::InteractAnimation.to_id()),
-                data: animation,
+                id: i32::from(DataComponent::AttackAnimation.to_id()),
+                data: vec![1, 6],
             }],
             removed: Vec::new(),
         };
@@ -934,7 +980,7 @@ mod cushion_and_nested_item_tests {
             .write(&mut item_payload, &item)
             .unwrap();
         let entry = EntityDataEntry {
-            index: 0,
+            index: 9,
             serializer: meta_data_type_id_for_name("item_stack", V::V_26_3).unwrap(),
             value: MetaValue::Item(item_payload),
         };
@@ -950,31 +996,34 @@ mod cushion_and_nested_item_tests {
             .read(&mut input)
             .expect("metadata list parses");
         assert!(input.is_empty());
-        let ids = MappingData::get().composed(V::V_26_2);
+        let ids = MappingData::get().composed(target);
+        let mut connection = UserConnection::new(23, target);
         let rewritten = rewrite_entries(
-            EntityType::PIG.id,
-            EntityType::PIG.id,
+            EntityType::ITEM_FRAME.id,
+            EntityType::ITEM_FRAME.id,
             &parsed,
-            V::V_26_2,
+            target,
             ids,
+            Some(&mut connection),
             0,
         );
         let MetaValue::Item(bytes) = &rewritten[0].value else {
             panic!("item metadata stays an item");
         };
+        assert_eq!(rewritten[0].index, 8);
         let mut item_input = bytes.as_slice();
-        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1); // count
-        VAR_INT.read(&mut item_input).unwrap(); // mapped diamond id
-        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1); // added
-        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 0); // removed
-        assert_eq!(
-            VAR_INT.read(&mut item_input).unwrap().0,
-            i32::from(DataComponent::AttackAnimation.to_id()),
-            "26.3 interaction animation collapses onto 26.2 attack animation"
-        );
-        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1);
-        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 6);
+        let mut returned = ClientboundItemT::new(target, ids)
+            .read(&mut item_input)
+            .unwrap();
         assert!(item_input.is_empty());
+        restore_full_item(&connection, &mut returned, target, ids);
+        let WireItem::Structured { added, .. } = returned else {
+            panic!("nested item remains structured");
+        };
+        assert!(added.contains(&ItemComponent {
+            id: i32::from(DataComponent::AttackAnimation.to_id()),
+            data: vec![1, 6],
+        }));
     }
 }
 

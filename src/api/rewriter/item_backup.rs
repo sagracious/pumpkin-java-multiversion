@@ -10,6 +10,7 @@ use pumpkin_protocol::{
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::item::{map_component_id, map_component_id_from_client};
+use crate::api::rewriter::item_nbt;
 use crate::api::types::{HashedItem, Item, ItemComponent};
 use crate::api::{ComposedMappings, IdMapping, UserConnection};
 
@@ -75,7 +76,7 @@ pub fn backup_clientbound_item(
     target: V,
     ids: &ComposedMappings,
 ) {
-    if target != V::V_26_2 {
+    if target >= V::V_26_3 {
         return;
     }
 
@@ -97,7 +98,8 @@ pub fn backup_clientbound_item(
             .expect("checked above")
     };
 
-    let Some((client_item_id, custom_hash)) = add_marker(downgraded, &backup.marker, ids) else {
+    let Some((client_item_id, custom_hash)) = add_marker(downgraded, &backup.marker, target, ids)
+    else {
         return;
     };
     cache.insert((client_item_id, custom_hash), backup);
@@ -173,7 +175,7 @@ pub fn restore_full_item(
     source: V,
     ids: &ComposedMappings,
 ) {
-    if source != V::V_26_2 {
+    if source >= V::V_26_3 {
         return;
     }
     let Item::Structured {
@@ -247,13 +249,20 @@ fn build_backup(
     else {
         return None;
     };
-    let Item::Structured {
-        added: client_added,
-        removed: client_removed,
-        ..
-    } = downgraded
-    else {
-        return None;
+    let decoded_legacy = match downgraded {
+        Item::Nbt { nbt, .. } => Some(match nbt {
+            Some(NbtTag::Compound(compound)) => item_nbt::nbt_to_components(compound, target),
+            None => Vec::new(),
+            Some(_) => return None,
+        }),
+        Item::Structured { .. } => None,
+        Item::Empty => return None,
+    };
+    let legacy_nbt = decoded_legacy.is_some();
+    let (client_added, client_removed): (&[ItemComponent], &[i32]) = match downgraded {
+        Item::Structured { added, removed, .. } => (added, removed),
+        Item::Nbt { .. } => (decoded_legacy.as_deref().unwrap_or_default(), &[]),
+        Item::Empty => return None,
     };
 
     let mut added_groups: HashMap<i32, Vec<&ItemComponent>> = HashMap::new();
@@ -262,7 +271,12 @@ fn build_backup(
         let Some(native) = component_type(component.id) else {
             return None;
         };
-        if let Some(mapped) = map_component_id(component.id, native, target, ids) {
+        let mapped = if legacy_nbt {
+            Some(component.id)
+        } else {
+            map_component_id(component.id, native, target, ids)
+        };
+        if let Some(mapped) = mapped {
             added_groups.entry(mapped).or_default().push(component);
         } else {
             added_unmapped.push(component.clone());
@@ -275,6 +289,10 @@ fn build_backup(
         let Some(native) = component_type(*component_id) else {
             return None;
         };
+        if legacy_nbt {
+            removed_unmapped.push(*component_id);
+            continue;
+        }
         if let Some(mapped) = map_component_id(*component_id, native, target, ids) {
             removed_groups
                 .entry(mapped)
@@ -326,16 +344,23 @@ fn build_backup(
     restore_added.sort_by_key(|component| component.id);
     restore_removed.sort_unstable();
 
-    let restore_added_hashes: Option<Vec<_>> = restore_added
-        .iter()
-        .map(|component| Some((component.id, component_hash(component)?)))
-        .collect();
-    let restore_added_hashes = restore_added_hashes?;
+    let restore_added_hashes = if target >= V::V_1_21_5 {
+        restore_added
+            .iter()
+            .map(|component| Some((component.id, component_hash(component)?)))
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        // The 1.21.5 step strips older clients' full item data when it turns
+        // clicks into hashes, so these component hashes are not sent upstream.
+        Vec::new()
+    };
 
     let inverse = ids.data_component_type_inverse();
     let mut remove_server_added = Vec::new();
     for target_id in remove_client_added {
-        if let Some(id) = map_component_id_from_client(target_id, target, inverse) {
+        if legacy_nbt {
+            remove_server_added.push(target_id);
+        } else if let Some(id) = map_component_id_from_client(target_id, target, inverse) {
             remove_server_added.push(id);
         }
         if let Some(group) = added_groups.get(&target_id) {
@@ -371,36 +396,66 @@ fn build_backup(
     })
 }
 
-fn add_marker(item: &mut Item, marker: &NbtCompound, ids: &ComposedMappings) -> Option<(i32, i32)> {
-    let Item::Structured { id, added, .. } = item else {
-        return None;
-    };
-    let client_item_id = *id;
-    let custom_id = map_component_id(
-        i32::from(DataComponent::CustomData.to_id()),
-        DataComponent::CustomData,
-        V::V_26_2,
-        ids,
-    )?;
-    let custom_data =
-        if let Some(existing) = added.iter_mut().find(|component| component.id == custom_id) {
-            let mut compound = read_custom_data(&existing.data)?;
+fn add_marker(
+    item: &mut Item,
+    marker: &NbtCompound,
+    target: V,
+    ids: &ComposedMappings,
+) -> Option<(i32, i32)> {
+    match item {
+        Item::Structured { id, added, .. } => {
+            let client_item_id = *id;
+            let custom_id = map_component_id(
+                i32::from(DataComponent::CustomData.to_id()),
+                DataComponent::CustomData,
+                target,
+                ids,
+            )?;
+            let custom_data = if let Some(existing) =
+                added.iter_mut().find(|component| component.id == custom_id)
+            {
+                let mut compound = read_custom_data(&existing.data)?;
+                if compound.child_tags.contains_key(BACKUP_KEY) {
+                    return None;
+                }
+                compound.put(BACKUP_KEY, NbtTag::Compound(marker.clone()));
+                existing.data = write_custom_data(&compound)?;
+                compound
+            } else {
+                let mut compound = NbtCompound::new();
+                compound.put(BACKUP_KEY, NbtTag::Compound(marker.clone()));
+                added.push(ItemComponent {
+                    id: custom_id,
+                    data: write_custom_data(&compound)?,
+                });
+                compound
+            };
+            Some((client_item_id, hash_compound(&custom_data)?))
+        }
+        Item::Nbt { id, nbt, .. } => {
+            let compound = match nbt {
+                Some(NbtTag::Compound(compound)) => compound,
+                None => {
+                    *nbt = Some(NbtTag::Compound(NbtCompound::new()));
+                    let Some(NbtTag::Compound(compound)) = nbt.as_mut() else {
+                        return None;
+                    };
+                    compound
+                }
+                Some(_) => return None,
+            };
             if compound.child_tags.contains_key(BACKUP_KEY) {
                 return None;
             }
             compound.put(BACKUP_KEY, NbtTag::Compound(marker.clone()));
-            existing.data = write_custom_data(&compound)?;
-            compound
-        } else {
-            let mut compound = NbtCompound::new();
-            compound.put(BACKUP_KEY, NbtTag::Compound(marker.clone()));
-            added.push(ItemComponent {
-                id: custom_id,
-                data: write_custom_data(&compound)?,
-            });
-            compound
-        };
-    Some((client_item_id, hash_compound(&custom_data)?))
+            let custom_data = item_nbt::nbt_to_components(compound, target)
+                .into_iter()
+                .find(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
+                .and_then(|component| read_custom_data(&component.data))?;
+            Some((*id, hash_compound(&custom_data)?))
+        }
+        Item::Empty => None,
+    }
 }
 
 fn marker_tag(added: &[ItemComponent], removed: &[i32]) -> NbtCompound {
@@ -573,7 +628,9 @@ fn crc32c(bytes: &[u8]) -> i32 {
 mod tests {
     use super::*;
     use crate::api::MappingData;
-    use crate::api::rewriter::item::StructuredItemRewriter;
+    use crate::api::rewriter::item::{
+        ClientboundItemT, StructuredItemRewriter, rewrite_item_value_with_connection,
+    };
     use crate::api::types::{ItemT, NbtT, VAR_INT, WireType};
     use pumpkin_data::data_component_impl::{get_i32_hash, get_str_hash};
     use pumpkin_data::item::Item as DataItem;
@@ -769,6 +826,145 @@ mod tests {
     }
 
     #[test]
+    fn inconvertible_components_round_trip_for_legacy_and_structured_clients() {
+        let mut custom_data = NbtCompound::new();
+        custom_data.put_string("owner", "kept".to_owned());
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND_SWORD.id),
+            added: vec![
+                ItemComponent {
+                    id: i32::from(DataComponent::AttackAnimation.to_id()),
+                    data: vec![0, 4],
+                },
+                ItemComponent {
+                    id: i32::from(DataComponent::Damage.to_id()),
+                    data: var_int_bytes(5),
+                },
+                ItemComponent {
+                    id: i32::from(DataComponent::CustomData.to_id()),
+                    data: write_custom_data(&custom_data).unwrap(),
+                },
+            ],
+            removed: Vec::new(),
+        };
+
+        for version in [V::V_1_16_2, V::V_1_20_5] {
+            let ids = MappingData::get().composed(version);
+            let mut downgraded = StructuredItemRewriter::to_version(&native, version, ids);
+            let mut connection = UserConnection::new(19, version);
+            backup_clientbound_item(&mut connection, &native, &mut downgraded, version, ids);
+
+            let mut wire = Vec::new();
+            ItemT::for_version(version)
+                .write(&mut wire, &downgraded)
+                .unwrap();
+            let mut input = wire.as_slice();
+            let client_item = ItemT::for_version(version).read(&mut input).unwrap();
+            assert!(input.is_empty(), "{version}");
+            let mut returned = StructuredItemRewriter::to_native(&client_item, version, ids);
+            restore_full_item(&connection, &mut returned, version, ids);
+            let Item::Structured { added, .. } = returned else {
+                panic!("the restored item remains structured");
+            };
+            assert!(added.contains(&native_component(
+                DataComponent::AttackAnimation,
+                vec![0, 4]
+            )));
+            assert!(added.contains(&native_component(DataComponent::Damage, var_int_bytes(5))));
+            let restored_custom_data = added
+                .iter()
+                .find(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
+                .and_then(|component| read_custom_data(&component.data))
+                .expect("the original custom data remains");
+            assert_eq!(
+                restored_custom_data.get_string("owner").as_deref(),
+                Some("kept")
+            );
+            assert!(!restored_custom_data.child_tags.contains_key(BACKUP_KEY));
+        }
+    }
+
+    #[test]
+    fn trim_and_instrument_components_round_trip_across_the_supported_layout_families() {
+        let trim = [
+            var_int_bytes(registry_id_26_3("trim_material", "iron")),
+            var_int_bytes(registry_id_26_3("trim_pattern", "coast")),
+        ]
+        .concat();
+        let instrument = var_int_bytes(registry_id_26_3("instrument", "ponder_goat_horn"));
+        let trim_material = var_int_bytes(registry_id_26_3("trim_material", "redstone"));
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND_SWORD.id),
+            added: vec![
+                native_component(DataComponent::Trim, trim),
+                native_component(DataComponent::Instrument, instrument),
+                native_component(DataComponent::ProvidesTrimMaterial, trim_material),
+            ],
+            removed: Vec::new(),
+        };
+
+        for version in [V::V_1_16_2, V::V_1_20_5, V::V_1_21_5, V::V_26_2] {
+            let ids = MappingData::get().composed(version);
+            let mut downgraded = StructuredItemRewriter::to_version(&native, version, ids);
+            let mut connection = UserConnection::new(20, version);
+            backup_clientbound_item(&mut connection, &native, &mut downgraded, version, ids);
+
+            let mut wire = Vec::new();
+            ItemT::for_version(version)
+                .write(&mut wire, &downgraded)
+                .unwrap();
+            let mut input = wire.as_slice();
+            let mut returned = ClientboundItemT::new(version, ids)
+                .read(&mut input)
+                .unwrap();
+            assert!(input.is_empty(), "{version}");
+            restore_full_item(&connection, &mut returned, version, ids);
+            let Item::Structured { added, .. } = returned else {
+                panic!("the restored item remains structured");
+            };
+            for expected in match &native {
+                Item::Structured { added, .. } => added,
+                _ => unreachable!(),
+            } {
+                assert!(
+                    added.contains(expected),
+                    "{version}: component {}",
+                    expected.id
+                );
+            }
+        }
+    }
+
+    fn native_component(component: DataComponent, data: Vec<u8>) -> ItemComponent {
+        ItemComponent {
+            id: i32::from(component.to_id()),
+            data,
+        }
+    }
+
+    fn var_int_bytes(value: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        VAR_INT
+            .write(&mut bytes, &pumpkin_protocol::codec::var_int::VarInt(value))
+            .unwrap();
+        bytes
+    }
+
+    fn registry_id_26_3(registry: &str, name: &str) -> i32 {
+        pumpkin_data::registry::REGISTRY_V_26_3
+            .iter()
+            .find(|entry| entry.registry_id == registry)
+            .unwrap()
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .and_then(|id| i32::try_from(id).ok())
+            .unwrap()
+    }
+
+    #[test]
     fn map_decoration_backup_round_trips_for_hash_clicks_and_full_items() {
         let version = V::V_26_2;
         let ids = MappingData::get().composed(version);
@@ -913,5 +1109,56 @@ mod tests {
         let restored = read_custom_data(&restored.data).unwrap();
         assert_eq!(restored.get_string("owner"), Some("server"));
         assert!(!restored.child_tags.contains_key(BACKUP_KEY));
+    }
+
+    #[test]
+    fn nested_stack_rewrite_records_and_restores_inconvertible_components() {
+        let version = V::V_1_21_4;
+        let ids = MappingData::get().composed(version);
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(DataItem::DIAMOND_SWORD.id),
+            added: vec![native_component(DataComponent::AttackAnimation, vec![1, 6])],
+            removed: Vec::new(),
+        };
+        let mut server_bytes = Vec::new();
+        ItemT::for_version(V::V_26_3)
+            .write(&mut server_bytes, &native)
+            .unwrap();
+        let mut input = server_bytes.as_slice();
+        let mut connection = UserConnection::new(21, version);
+        let client_bytes =
+            rewrite_item_value_with_connection(&mut input, version, ids, &mut connection).unwrap();
+        assert!(input.is_empty());
+
+        let mut reader = client_bytes.as_slice();
+        let mut returned = ClientboundItemT::new(version, ids)
+            .read(&mut reader)
+            .unwrap();
+        assert!(reader.is_empty());
+        let Item::Structured { added, .. } = &returned else {
+            panic!("nested result is structured");
+        };
+        let custom_data = added
+            .iter()
+            .find(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
+            .and_then(|component| read_custom_data(&component.data))
+            .expect("nested stack carries the per-connection backup marker");
+        assert!(custom_data.child_tags.contains_key(BACKUP_KEY));
+
+        restore_full_item(&connection, &mut returned, version, ids);
+        let Item::Structured { added, .. } = returned else {
+            panic!("restored nested item is structured");
+        };
+        assert!(added.contains(&native_component(
+            DataComponent::AttackAnimation,
+            vec![1, 6]
+        )));
+        let custom_data = added
+            .iter()
+            .find(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
+            .and_then(|component| read_custom_data(&component.data))
+            .expect("custom data remains after removing the marker");
+        assert!(!custom_data.child_tags.contains_key(BACKUP_KEY));
     }
 }
