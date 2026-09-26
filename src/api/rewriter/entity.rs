@@ -185,10 +185,17 @@ fn rewrite_value(
     ids: &ComposedMappings,
 ) -> Option<MetaValue> {
     Some(match value {
-        // `EntityDataListT::read_value` already routes nested item stacks
-        // through `rewrite_item_value` using this target layout. Rewriting
-        // again here would treat target ids as 26.3 ids and double-map them.
-        MetaValue::Raw(_) | MetaValue::Item(_) => value.clone(),
+        // Entity metadata is decoded in Pumpkin's native 26.3 form before
+        // this target-version pass.
+        MetaValue::Raw(_) => value.clone(),
+        MetaValue::Item(bytes) => {
+            let mut input = bytes.as_slice();
+            let item = crate::api::rewriter::item::rewrite_item_value(&mut input, layout, ids)?;
+            if !input.is_empty() {
+                return None;
+            }
+            MetaValue::Item(item)
+        }
         // A state the client lacks falls back to air, as every other state id does.
         MetaValue::BlockState(state) => MetaValue::BlockState(block_state(*state, ids)),
         // Zero is "no block state" and is not an id.
@@ -236,8 +243,8 @@ fn block_state(state: i32, ids: &ComposedMappings) -> i32 {
         .unwrap_or(0)
 }
 
-/// Core writes the indices, serializer ids and values of 26.3 in the client's
-/// layout, so this renumbers all three.
+/// Core writes native 26.3 entity metadata. Decode it once, then rewrite the
+/// indices, serializer ids, and values for the client's version.
 pub fn set_entity_data(
     wrapper: &mut PacketWrapper,
     connection: &mut UserConnection,
@@ -249,8 +256,10 @@ pub fn set_entity_data(
         return Ok(());
     }
     let entity_id = wrapper.passthrough(&VAR_INT)?;
-    let list = EntityDataListT::for_version(layout);
-    let entries = wrapper.read(&list)?;
+    // Pumpkin emits entity metadata in its native 26.3 serializer layout.
+    // Decode that once, then write the client's serializer/index layout after
+    // the entity-specific conversion below.
+    let entries = wrapper.read(&EntityDataListT::for_version(JavaMinecraftVersion::V_26_3))?;
     // Without the entity type there is no index rule to apply, and an entry
     // under the wrong one is fatal to the client.
     let game_time = connection
@@ -267,7 +276,7 @@ pub fn set_entity_data(
             rewrite_entries(server_type, client_type, &entries, layout, ids, game_time)
         })
         .unwrap_or_default();
-    wrapper.write(&list, &entries)
+    wrapper.write(&EntityDataListT::for_version(layout), &entries)
 }
 
 /// One attribute, with the id part kept as written so a name can go back out.
@@ -403,14 +412,6 @@ mod tests {
     /// for each layout.
     #[test]
     fn a_pig_is_renumbered_for_every_layout() {
-        let source = pig_list();
-        let mut source_reader = source.as_slice();
-        assert_eq!(VAR_INT.read(&mut source_reader).unwrap().0, 7);
-        let canonical_entries = EntityDataListT::for_version(V::V_26_3)
-            .read(&mut source_reader)
-            .unwrap();
-        assert!(source_reader.is_empty());
-
         let mut v26_2 = vec![7u8, 0, 0, 0x08, 9, 3];
         v26_2.extend(health());
         v26_2.extend([10, 17, 0, 16, 8, 1, 19, 28, 2, TERMINATOR]);
@@ -438,20 +439,11 @@ mod tests {
             (V::V_1_18_2, v1_18_2),
             (V::V_1_16_2, v1_16_2),
         ] {
-            let ids = MappingData::get().composed(layout);
-            let entries = rewrite_entries(
-                EntityType::PIG.id,
-                EntityType::PIG.id,
-                &canonical_entries,
-                layout,
-                ids,
-                0,
+            assert_eq!(
+                translate(&pig_list(), EntityType::PIG.id, layout),
+                want,
+                "{layout}"
             );
-            let mut actual = vec![7u8];
-            EntityDataListT::for_version(layout)
-                .write(&mut actual, &entries)
-                .unwrap();
-            assert_eq!(actual, want, "{layout}");
         }
     }
 
@@ -696,8 +688,8 @@ mod tests {
 
         let key = 0x656e74_u64;
         crate::api::remove_connection(key);
-        // 1.16.2's wire serializer id for float is 2; health is tracked at 8.
-        let mut data = vec![7u8, 0, 0, 0x08, 8, 2];
+        // Core sends native 26.3 metadata: float health is at index 9/type 3.
+        let mut data = vec![7u8, 0, 0, 0x08, 9, 3];
         data.extend(health());
         data.push(TERMINATOR);
         let before = crate::pipeline::translate_clientbound(
@@ -951,10 +943,10 @@ mod cushion_and_nested_item_tests {
             .write(&mut metadata_26_3, &vec![entry])
             .unwrap();
 
-        // The list reader performs nested item conversion before rewrite_value
-        // forwards the already-target-shaped MetaValue::Item.
+        // Read the packet in Pumpkin's native 26.3 layout, then verify the
+        // entity rewrite converts its nested stack for the older client.
         let mut input = metadata_26_3.as_slice();
-        let parsed = EntityDataListT::for_version(V::V_26_2)
+        let parsed = EntityDataListT::for_version(V::V_26_3)
             .read(&mut input)
             .expect("metadata list parses");
         assert!(input.is_empty());
