@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn via_new_item_fallbacks_add_the_custom_model_data_marker() {
         let target = V::V_26_2;
-        let ids = ids(target);
+        let mappings = ids(target);
         let native = Item::Structured {
             count: 1,
             id: 72,
@@ -869,7 +869,7 @@ mod tests {
             removed: Vec::new(),
         };
 
-        let downgraded = StructuredItemRewriter::to_version(&native, target, ids);
+        let downgraded = StructuredItemRewriter::to_version(&native, target, mappings);
         let Item::Structured { added, .. } = &downgraded else {
             panic!("the Via item fallback remains a structured stack");
         };
@@ -877,7 +877,7 @@ mod tests {
             i32::from(DataComponent::CustomModelData.to_id()),
             DataComponent::CustomModelData,
             target,
-            ids,
+            mappings,
         )
         .expect("the target has a custom model data component");
         let model = added
@@ -886,7 +886,7 @@ mod tests {
             .expect("Via custom model data fallback");
         assert_eq!(item_nbt::legacy_custom_model_data(&model.data), Some(865));
 
-        let restored = StructuredItemRewriter::to_native(&downgraded, target, ids);
+        let restored = StructuredItemRewriter::to_native(&downgraded, target, mappings);
         assert_eq!(restored.item_id(), Some(72));
 
         let old_target = V::V_1_20_3;

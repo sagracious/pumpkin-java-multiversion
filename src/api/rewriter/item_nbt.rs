@@ -9,11 +9,11 @@ use pumpkin_protocol::ser::{NetworkReadExt, NetworkReadSliceExt, NetworkWriteExt
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
-use crate::api::ComposedMappings;
 use crate::api::rewriter::item_component::{
     legacy_modifier_uuid, registry_entry_id, registry_entry_name,
 };
 use crate::api::types::ItemComponent;
+use crate::api::{ComposedMappings, MappingData};
 use crate::data::entity_types::stand_in_type_for_version;
 
 /// The enchantments every client from 1.13.2 up has, by registry name
@@ -895,7 +895,12 @@ pub fn components_to_nbt(
 
     if !unsupported_enchantment_lore.is_empty() {
         let mut lore = unsupported_enchantment_lore;
-        lore.extend(display.get_list("Lore").cloned().unwrap_or_default());
+        lore.extend(
+            display
+                .get_list("Lore")
+                .map(|lines| lines.to_vec())
+                .unwrap_or_default(),
+        );
         display.put_list("Lore", lore);
     }
     if !display.is_empty() {
