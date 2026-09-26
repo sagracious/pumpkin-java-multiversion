@@ -2,10 +2,11 @@ use pumpkin_data::entity::EntityType;
 use pumpkin_protocol::ClientPacket;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::CSpawnEntity;
+use pumpkin_protocol::ser::NetworkReadExt;
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
-use crate::api::types::{F32, U8, VAR_INT};
+use crate::api::types::{F32, F64, U8, VAR_INT, WireType};
 use crate::api::{Ctx, MappingData, PacketWrapper, Registry, TranslateError, UserConnection};
 use crate::data::entity_data_types::meta_data_type_id_for_name;
 use crate::packet::mappings::{clientbound, serverbound};

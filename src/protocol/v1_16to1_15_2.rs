@@ -21,8 +21,8 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 use uuid::Uuid;
 
 use crate::api::types::{
-    BOOL, BYTE_ARRAY, F32T, F64T, I8T, I32T, NbtT, OptionalT, STRING, TextComponentT, U8T, UUID,
-    VAR_INT, WireType,
+    BOOL, BYTE_ARRAY, F32T, F64T, I8T, I32T, I64T, NbtT, OptionalT, STRING, TextComponentT, U8T,
+    UUID, VAR_INT, WireType,
 };
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,

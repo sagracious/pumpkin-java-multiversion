@@ -4,7 +4,9 @@ use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::entity_data::EntityDataListT;
-use crate::api::types::{I64T, NbtT, OptionalT, STRING, TextComponentT, U8, VAR_INT, VAR_LONG};
+use crate::api::types::{
+    BOOL, I64T, NbtT, OptionalT, STRING, TextComponentT, U8, VAR_INT, VAR_LONG, WireType,
+};
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
 };
@@ -132,7 +134,7 @@ fn block_update_bed_entity(
     connection: &mut UserConnection,
     _ctx: &Ctx,
 ) -> Result<(), TranslateError> {
-    let position = wrapper.passthrough(&I64T)?.0;
+    let position = wrapper.passthrough(&I64T)?;
     let state = wrapper.passthrough(&VAR_INT)?.0;
     if state_is_26_2_bed(state, connection.version)
         && let Some(payload) = bed_block_entity_payload(position, connection.version)
@@ -147,7 +149,7 @@ fn section_blocks_update_bed_entities(
     connection: &mut UserConnection,
     _ctx: &Ctx,
 ) -> Result<(), TranslateError> {
-    let section_position = wrapper.passthrough(&I64T)?.0;
+    let section_position = wrapper.passthrough(&I64T)?;
     if (V::V_1_16..=V::V_1_19_4).contains(&connection.version) {
         wrapper.passthrough(&BOOL)?;
     }

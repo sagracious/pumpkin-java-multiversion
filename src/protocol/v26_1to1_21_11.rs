@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::api::connection::{GameTimeStorage, UserConnection};
 use crate::api::types::{BOOL, F32T, I64T, NbtT, STRING, U8, VAR_INT, WireType};
-use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError};
+use crate::api::{Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError};
 use crate::packet::mappings::{clientbound, serverbound};
 
 const FIRST_VERSION_WITH_REGISTRY_TAGS: V = V::V_1_17;

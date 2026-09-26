@@ -535,7 +535,7 @@ fn read_lp_vector_3d(cursor: &mut &[u8]) -> Option<pumpkin_util::math::vector3::
         return Some(Vector3::new(0.0, 0.0, 0.0));
     }
     let decode = |shift| {
-        let quantized = ((packed >> shift) & 0x7fff) as f64;
+        let quantized = ((packed >> shift) & 0x7fff_i64) as f64;
         ((quantized / 32766.0) - 0.5) * 2.0 * scale as f64
     };
     Some(Vector3::new(decode(3), decode(18), decode(33)))

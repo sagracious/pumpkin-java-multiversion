@@ -1,3 +1,4 @@
+use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::types::{BOOL, I16T, ItemT, VAR_INT};
@@ -56,7 +57,7 @@ fn edit_book(
                 .map_or(0, |storage| storage.current_hand),
         )
     };
-    wrapper.write(&VAR_INT, &slot)?;
+    wrapper.write(&VAR_INT, &VarInt(slot))?;
     Ok(())
 }
 

@@ -67,7 +67,7 @@ fn rewrite_tags(payload: &[u8], version: V) -> Option<Vec<u8>> {
             rewrite_tag_members(&mut cursor, &mut out, registry)?;
         }
     } else {
-        let groups = cursor.get_var_int()?.0;
+        let groups = cursor.get_var_int().ok()?.0;
         if !(0..=256).contains(&groups) {
             return None;
         }
@@ -297,19 +297,6 @@ fn registry_data(
         return Err(TranslateError::TrailingBytes(cursor.len()));
     }
     wrapper.replace_remaining(out);
-    Ok(())
-}
-
-fn update_tags(
-    wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
-    ctx: &Ctx,
-) -> Result<(), TranslateError> {
-    if let Some(out) = rewrite_tags(wrapper.remaining(), ctx.layout) {
-        wrapper.replace_remaining(out);
-    } else {
-        wrapper.passthrough_all();
-    }
     Ok(())
 }
 

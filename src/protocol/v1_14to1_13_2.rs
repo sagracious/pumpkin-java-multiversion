@@ -293,7 +293,7 @@ fn commands(
                     wrapper.write(&I32, &0)?;
                 }
                 _ => {
-                    wrapper.write(&STRING, &parser.into())?;
+                    wrapper.write(&STRING, &parser.clone().into())?;
                     copy_command_properties(wrapper, &parser)?;
                 }
             }
@@ -315,8 +315,12 @@ fn copy_command_properties(
         "brigadier:float" => copy_number_properties(wrapper, &F32)?,
         "brigadier:integer" => copy_number_properties(wrapper, &I32)?,
         "brigadier:long" => copy_number_properties(wrapper, &crate::api::types::I64)?,
-        "brigadier:string" => wrapper.passthrough(&VAR_INT)?,
-        "minecraft:entity" | "minecraft:score_holder" => wrapper.passthrough(&U8)?,
+        "brigadier:string" => {
+            wrapper.passthrough(&VAR_INT)?;
+        }
+        "minecraft:entity" | "minecraft:score_holder" => {
+            wrapper.passthrough(&U8)?;
+        }
         // The remaining 1.14 argument parsers have no payload properties.
         _ => {}
     }

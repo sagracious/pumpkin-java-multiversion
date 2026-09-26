@@ -5,7 +5,7 @@ use pumpkin_data::data_component::DataComponent;
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_protocol::{
     codec::data_component,
-    ser::{NetworkReadExt, NetworkWriteExt},
+    ser::{NetworkReadExt, NetworkReadSliceExt, NetworkWriteExt},
 };
 use pumpkin_util::version::JavaMinecraftVersion as V;
 

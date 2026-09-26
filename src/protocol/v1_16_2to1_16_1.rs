@@ -928,7 +928,8 @@ mod tests {
         )
         .unwrap();
         let translated = wrapper.finish().unwrap().unwrap();
-        let spawn = CSpawnEntity::read_packet_data(&translated.payload, &version).unwrap();
+        let spawn =
+            CSpawnEntity::read_packet_data(translated.payload.as_slice(), &version).unwrap();
         assert_eq!(spawn.r#type.0, i32::try_from(piglin_id).unwrap());
         assert_eq!(
             connection.entity_tracker.client_entity_type(7),

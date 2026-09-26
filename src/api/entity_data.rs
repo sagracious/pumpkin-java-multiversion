@@ -6,7 +6,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::rewriter::item::rewrite_item_value;
 use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle_for_layout};
-use crate::api::types::{NbtT, STRING, VAR_INT, VAR_LONG, WireType};
+use crate::api::types::{F32T, I64T, NbtT, STRING, VAR_INT, VAR_LONG, WireType};
 use crate::data::entity_data_types::{
     MetaKind, canonical_meta_data_type_id_for_version, meta_kind,
 };

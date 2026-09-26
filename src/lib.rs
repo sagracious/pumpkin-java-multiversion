@@ -354,6 +354,7 @@ mod protocol_packet_event_tests {
             connection_state: 5,
             translated: false,
             clientbound_packets: Vec::new(),
+            serverbound_packets: Vec::new(),
             cancelled: false,
         };
 
@@ -411,6 +412,7 @@ mod protocol_packet_event_tests {
                 connection_state: 4,
                 translated: false,
                 clientbound_packets: Vec::new(),
+                serverbound_packets: Vec::new(),
                 cancelled: false,
             };
             let collected = translate_protocol_packet(event);
@@ -431,6 +433,7 @@ mod protocol_packet_event_tests {
             connection_state: 4,
             translated: false,
             clientbound_packets: Vec::new(),
+            serverbound_packets: Vec::new(),
             cancelled: false,
         };
         let translated = translate_protocol_packet(event);

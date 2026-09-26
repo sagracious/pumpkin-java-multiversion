@@ -3,7 +3,9 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_util::translation::Locale;
 use pumpkin_util::version::JavaMinecraftVersion;
 
-use crate::api::types::{BOOL, I8, I32, I64, REMAINING_BYTES, STRING, TextComponentT, U8, VAR_INT};
+use crate::api::types::{
+    BOOL, I8, I32, I64, REMAINING_BYTES, STRING, TextComponentT, U8, VAR_INT, WireType,
+};
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
 use crate::packet::mappings::{clientbound, serverbound};
 
