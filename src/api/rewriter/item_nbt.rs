@@ -706,7 +706,7 @@ fn component_hidden_in_tooltip(added: &[ItemComponent], component: DataComponent
     let Some(tooltip) = find(added, DataComponent::TooltipDisplay) else {
         return false;
     };
-    let mut cursor = tooltip.data.as_slice();
+    let mut cursor = tooltip;
     let Ok(hide_all) = cursor.get_bool() else {
         return true;
     };
@@ -889,7 +889,7 @@ fn legacy_template_item_list(
     optional: bool,
 ) -> Option<Vec<NbtTag>> {
     let mut cursor = bytes;
-    let count = cursor.get_var_int()?.0;
+    let count = cursor.get_var_int().ok()?.0;
     if !(0..=4096).contains(&count) {
         return None;
     }
@@ -1282,7 +1282,7 @@ fn legacy_block_predicates(
                 value.push_str(&properties.join(","));
                 value.push(']');
             }
-            output.push(NbtTag::String(value));
+            output.push(NbtTag::String(value.into()));
         }
     }
     cursor.is_empty().then_some(output)

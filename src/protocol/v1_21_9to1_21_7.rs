@@ -45,6 +45,7 @@ fn debug_subscription_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::WireType;
     use pumpkin_protocol::codec::var_int::VarInt;
     use pumpkin_protocol::ser::NetworkWriteExt;
     use pumpkin_util::version::JavaMinecraftVersion as V;

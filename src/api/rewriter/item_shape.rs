@@ -41,11 +41,11 @@ const UNIT: Shape = Shape::Unit;
 const BOOL: Shape = Shape::Bool;
 const I32: Shape = Shape::I32;
 const F32: Shape = Shape::F32;
-const VAR_INT: Shape = Shape::VarInt;
-const STR: Shape = Shape::Str;
-const NBT: Shape = Shape::Nbt;
-const ID_SET: Shape = Shape::IdSet;
-const SOUND: Shape = Shape::Sound;
+pub(crate) const VAR_INT: Shape = Shape::VarInt;
+pub(crate) const STR: Shape = Shape::Str;
+pub(crate) const NBT: Shape = Shape::Nbt;
+pub(crate) const ID_SET: Shape = Shape::IdSet;
+pub(crate) const SOUND: Shape = Shape::Sound;
 const TEMPLATE: Shape = Shape::Template;
 
 static ENCHANTMENTS: Shape = Shape::Array(&Shape::Seq(&[Shape::VarInt, Shape::VarInt]));

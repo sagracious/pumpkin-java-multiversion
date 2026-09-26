@@ -5,7 +5,7 @@ use pumpkin_protocol::ser::{NetworkReadExt, NetworkReadSliceExt, NetworkWriteExt
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::ComposedMappings;
-use crate::api::rewriter::item_shape::{self, Shape};
+use crate::api::rewriter::item_shape::{self, ID_SET, NBT, SOUND, STR, Shape, VAR_INT};
 use crate::api::types::{ItemT, TEMPLATE_ITEM, WireType};
 
 /// Scratch buffers cannot run out of room, so the write errors of a byte
@@ -441,8 +441,8 @@ fn adventure_mode_predicates(
         }
         // 1.21.5 added data-component matchers to adventure predicates. Via
         // deliberately drops them when it writes the 1.21.4 predicate form.
-        skip(&Shape::Array(&Shape::Component), &mut cursor)?;
-        skip(&Shape::Array(&VAR_INT), &mut cursor)?;
+        item_shape::skip(&Shape::Array(&Shape::Component), &mut cursor)?;
+        item_shape::skip(&Shape::Array(&VAR_INT), &mut cursor)?;
     }
     if !cursor.is_empty() {
         return Err(ReadingError::Message(format!(
@@ -1784,7 +1784,7 @@ pub fn food_to_legacy(
         let mut cursor = consumable;
         eat_seconds = cursor.get_f32_be()?;
         cursor.get_var_int()?; // Animation.
-        skip(&SOUND, &mut cursor)?;
+        item_shape::skip(&SOUND, &mut cursor)?;
         cursor.get_bool()?; // Consume particles.
         let count = cursor.get_var_int()?.0;
         if !(0..=4096).contains(&count) {

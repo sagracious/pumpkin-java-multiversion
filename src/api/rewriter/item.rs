@@ -6,7 +6,9 @@ use pumpkin_protocol::ser::{
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::{item_component, item_nbt};
-use crate::api::types::{Item, ItemComponent, ItemT, WireType, component_payload_len};
+use crate::api::types::{
+    Item, ItemComponent, ItemT, TEMPLATE_ITEM, WireType, component_payload_len,
+};
 use crate::api::{
     ComposedMappings, IdMapping, MappingData, PacketWrapper, TranslateError, UserConnection,
 };
@@ -1192,7 +1194,7 @@ mod tests {
         let target = V::V_1_20_5;
         let mappings = ids(target);
         let source_item = i32::from(pumpkin_data::item::Item::PAPER.id);
-        let client_item = map(mappings.items, source_item).unwrap();
+        let client_item = map(&mappings.items, source_item).unwrap();
         let damage_id = i32::from(DataComponent::Damage.to_id());
         let client_damage =
             map_component_id(damage_id, DataComponent::Damage, target, mappings).unwrap();
@@ -1310,7 +1312,7 @@ mod tests {
         assert_eq!(
             remainder.item_id(),
             map(
-                mappings.items,
+                &mappings.items,
                 i32::from(pumpkin_data::item::Item::GLASS_BOTTLE.id)
             )
         );

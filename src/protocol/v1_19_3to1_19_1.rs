@@ -357,6 +357,7 @@ mod tests {
 #[cfg(test)]
 mod player_tests {
     use super::*;
+    use crate::api::MappingData;
     use crate::api::remove_connection;
     use crate::pipeline::translate_clientbound;
     use pumpkin_protocol::Property;
