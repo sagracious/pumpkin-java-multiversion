@@ -94,6 +94,7 @@ fn sulfur_cube_metadata(
         wrapper.passthrough_all();
         return Ok(());
     }
+    let server_type = EntityType::SULFUR_CUBE.id;
     let data = wrapper.read(&EntityDataListT::for_version(connection.version))?;
     let client_type = connection
         .entity_tracker
