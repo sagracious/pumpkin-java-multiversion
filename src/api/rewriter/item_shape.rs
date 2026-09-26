@@ -472,7 +472,7 @@ pub fn skip(shape: &Shape, r: &mut &[u8]) -> Result<(), ReadingError> {
 
 const MAX_EFFECT_DEPTH: usize = 32;
 
-fn skip_effect_parameters(r: &mut &[u8]) -> Result<(), ReadingError> {
+pub(crate) fn skip_effect_parameters(r: &mut &[u8]) -> Result<(), ReadingError> {
     for _ in 0..MAX_EFFECT_DEPTH {
         r.get_var_int()?;
         r.get_var_int()?;

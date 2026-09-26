@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use pumpkin_data::attributes::Attributes;
 use pumpkin_data::data_component::DataComponent;
 use pumpkin_data::enchantment::Enchantment;
@@ -12,7 +14,8 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 use crate::api::rewriter::item_component::{
     legacy_modifier_uuid, registry_entry_id, registry_entry_name,
 };
-use crate::api::types::ItemComponent;
+use crate::api::rewriter::item_shape::{self, Shape};
+use crate::api::types::{Item, ItemComponent, TEMPLATE_ITEM, WireType};
 use crate::api::{ComposedMappings, MappingData};
 use crate::data::entity_types::stand_in_type_for_version;
 
@@ -699,6 +702,215 @@ fn read_modifiers(r: &mut &[u8]) -> Option<Vec<Modifier>> {
     Some(modifiers)
 }
 
+fn component_hidden_in_tooltip(added: &[ItemComponent], component: DataComponent) -> bool {
+    let Some(tooltip) = find(added, DataComponent::TooltipDisplay) else {
+        return false;
+    };
+    let mut cursor = tooltip.data.as_slice();
+    let Ok(hide_all) = cursor.get_bool() else {
+        return true;
+    };
+    if hide_all {
+        return true;
+    }
+    let Ok(count) = cursor.get_var_int() else {
+        return true;
+    };
+    if !(0..=4096).contains(&count.0) {
+        return true;
+    }
+    (0..count.0).any(|_| {
+        cursor
+            .get_var_int()
+            .is_ok_and(|id| id.0 == i32::from(component.to_id()))
+    })
+}
+
+fn legacy_custom_potion_effects(r: &mut &[u8], version: V) -> Option<Vec<NbtTag>> {
+    let count = r.get_var_int().ok()?.0;
+    if !(0..=4096).contains(&count) {
+        return None;
+    }
+    let mut effects = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let source_id = r.get_var_int().ok()?.0;
+        let mut effect_data = Vec::new();
+        let data_start = *r;
+        item_shape::skip_effect_parameters(r).ok()?;
+        effect_data.extend_from_slice(&data_start[..data_start.len() - r.len()]);
+        let name = registry_entry_name(V::V_26_3, "mob_effect", source_id);
+        let target_id = name.and_then(|name| registry_entry_id(version, "mob_effect", name));
+        if let Some(target_id) = target_id
+            && let Some(data) = potion_effect_data_to_nbt(&effect_data)
+        {
+            let mut effect = data;
+            effect.put_byte("Id", target_id as i8);
+            effects.push(NbtTag::Compound(effect));
+        }
+    }
+    if r.get_bool().ok()? {
+        r.get_str().ok()?; // Custom potion name.
+    }
+    r.is_empty().then_some(effects)
+}
+
+fn potion_effect_data_to_nbt(bytes: &[u8]) -> Option<NbtCompound> {
+    let mut cursor = bytes;
+    let amplifier = cursor.get_var_int().ok()?.0;
+    let duration = cursor.get_var_int().ok()?.0;
+    let ambient = cursor.get_bool().ok()?;
+    let show_particles = cursor.get_bool().ok()?;
+    let show_icon = cursor.get_bool().ok()?;
+    let has_hidden = cursor.get_bool().ok()?;
+    let mut effect = NbtCompound::new();
+    effect.put_byte("Amplifier", amplifier as i8);
+    effect.put_int("Duration", duration);
+    effect.put_bool("Ambient", ambient);
+    effect.put_bool("ShowParticles", show_particles);
+    effect.put_bool("ShowIcon", show_icon);
+    if has_hidden {
+        let hidden_start = cursor;
+        item_shape::skip_effect_parameters(&mut cursor).ok()?;
+        let hidden_data = &hidden_start[..hidden_start.len() - cursor.len()];
+        effect.put_compound("HiddenEffect", potion_effect_data_to_nbt(hidden_data)?);
+    }
+    cursor.is_empty().then_some(effect)
+}
+
+static ITEMS_1_16_2: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_17: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_18: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_19: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_19_3: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_19_4: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_20: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_20_2: OnceLock<Vec<String>> = OnceLock::new();
+static ITEMS_1_20_3: OnceLock<Vec<String>> = OnceLock::new();
+
+fn legacy_item_names(version: V) -> Option<&'static [String]> {
+    let (cache, data): (&OnceLock<Vec<String>>, &str) = if version < V::V_1_17 {
+        (
+            &ITEMS_1_16_2,
+            include_str!("../../../assets/items/1_16_2_items.json"),
+        )
+    } else if version < V::V_1_18 {
+        (
+            &ITEMS_1_17,
+            include_str!("../../../assets/items/1_17_items.json"),
+        )
+    } else if version < V::V_1_19 {
+        (
+            &ITEMS_1_18,
+            include_str!("../../../assets/items/1_18_items.json"),
+        )
+    } else if version < V::V_1_19_3 {
+        (
+            &ITEMS_1_19,
+            include_str!("../../../assets/items/1_19_items.json"),
+        )
+    } else if version < V::V_1_19_4 {
+        (
+            &ITEMS_1_19_3,
+            include_str!("../../../assets/items/1_19_3_items.json"),
+        )
+    } else if version < V::V_1_20 {
+        (
+            &ITEMS_1_19_4,
+            include_str!("../../../assets/items/1_19_4_items.json"),
+        )
+    } else if version < V::V_1_20_2 {
+        (
+            &ITEMS_1_20,
+            include_str!("../../../assets/items/1_20_items.json"),
+        )
+    } else if version < V::V_1_20_3 {
+        (
+            &ITEMS_1_20_2,
+            include_str!("../../../assets/items/1_20_2_items.json"),
+        )
+    } else if version < V::V_1_20_5 {
+        (
+            &ITEMS_1_20_3,
+            include_str!("../../../assets/items/1_20_3_items.json"),
+        )
+    } else {
+        return None;
+    };
+    Some(
+        cache
+            .get_or_init(|| serde_json::from_str(data).expect("bundled item registry is valid"))
+            .as_slice(),
+    )
+}
+
+fn legacy_item_stack_tag(
+    item: &Item,
+    version: V,
+    ids: &ComposedMappings,
+    slot: Option<i8>,
+) -> Option<NbtTag> {
+    let Item::Structured {
+        count, id, added, ..
+    } = item
+    else {
+        return None;
+    };
+    let target_id = usize::try_from(map_item_id(&ids.items, *id)?).ok()?;
+    let name = legacy_item_names(version)?.get(target_id)?;
+    let mut tag = NbtCompound::new();
+    tag.put_string(
+        "id",
+        if name.contains(':') {
+            name.clone()
+        } else {
+            format!("minecraft:{name}")
+        },
+    );
+    tag.put_byte("Count", i8::try_from(*count).unwrap_or(i8::MAX));
+    if let Some(slot) = slot {
+        tag.put_byte("Slot", slot);
+    }
+    if let Some(components) = components_to_nbt(added, version, ids) {
+        if !components.is_empty() {
+            tag.put_compound("tag", components);
+        }
+    }
+    Some(NbtTag::Compound(tag))
+}
+
+fn map_item_id(mapping: &crate::api::IdMapping, id: i32) -> Option<i32> {
+    i32::try_from(mapping.map(u32::try_from(id).ok()?)?).ok()
+}
+
+fn legacy_template_item_list(
+    bytes: &[u8],
+    version: V,
+    ids: &ComposedMappings,
+    optional: bool,
+) -> Option<Vec<NbtTag>> {
+    let mut cursor = bytes;
+    let count = cursor.get_var_int()?.0;
+    if !(0..=4096).contains(&count) {
+        return None;
+    }
+    let mut items = Vec::new();
+    for index in 0..count {
+        if optional && !cursor.get_bool().ok()? {
+            continue;
+        }
+        let item = TEMPLATE_ITEM.read(&mut cursor).ok()?;
+        let slot = if optional {
+            Some(i8::try_from(index).ok()?)
+        } else {
+            None
+        };
+        if let Some(item) = legacy_item_stack_tag(&item, version, ids, slot) {
+            items.push(item);
+        }
+    }
+    cursor.is_empty().then_some(items)
+}
+
 /// The NBT a client below 1.20.5 should receive for a stack's components, or
 /// `None` when none of them can be expressed there.
 #[must_use]
@@ -717,6 +929,10 @@ pub fn components_to_nbt(
             _ => None,
         })
         .unwrap_or_default();
+    let mut hide_flags = root
+        .get("HideFlags")
+        .and_then(extract_int_like)
+        .unwrap_or(0);
     // Unknown display children belong to custom_data too. Keep them as a base
     // and let the actual item components replace only their legacy keys.
     let mut display = root.get_compound("display").cloned().unwrap_or_default();
@@ -789,6 +1005,42 @@ pub fn components_to_nbt(
                     root.put_int("map", id.0);
                 }
             }
+            DataComponent::ChargedProjectiles | DataComponent::BundleContents => {
+                if let Some(items) = legacy_template_item_list(&entry.data, version, ids, false) {
+                    if component == DataComponent::ChargedProjectiles {
+                        root.put_list("ChargedProjectiles", items.clone());
+                        root.put_bool("Charged", !items.is_empty());
+                    } else {
+                        root.put_list("Items", items);
+                    }
+                }
+            }
+            DataComponent::Container => {
+                if let Some(items) = legacy_template_item_list(&entry.data, version, ids, true) {
+                    let mut block_entity = root
+                        .get_compound("BlockEntityTag")
+                        .cloned()
+                        .unwrap_or_default();
+                    block_entity.put_list("Items", items);
+                    root.put_compound("BlockEntityTag", block_entity);
+                }
+            }
+            DataComponent::CanPlaceOn | DataComponent::CanBreak => {
+                if let Some(predicates) = legacy_block_predicates(&entry.data, version, ids) {
+                    let hidden = component_hidden_in_tooltip(added, component);
+                    if component == DataComponent::CanPlaceOn {
+                        root.put_list("CanPlaceOn", predicates);
+                        if hidden {
+                            hide_flags |= 16;
+                        }
+                    } else {
+                        root.put_list("CanDestroy", predicates);
+                        if hidden {
+                            hide_flags |= 8;
+                        }
+                    }
+                }
+            }
             DataComponent::PotionContents => {
                 let Ok(has_potion) = r.get_bool() else {
                     continue;
@@ -804,8 +1056,11 @@ pub fn components_to_nbt(
                 {
                     root.put_int("CustomPotionColor", color);
                 }
-                // Custom effects carry numeric effect ids the client numbers
-                // differently, so they are left out rather than renumbered.
+                if let Some(effects) = legacy_custom_potion_effects(&mut r, version)
+                    && !effects.is_empty()
+                {
+                    root.put_list("CustomPotionEffects", effects);
+                }
             }
             DataComponent::Profile => {
                 if let Some(owner) =
@@ -906,6 +1161,9 @@ pub fn components_to_nbt(
     if !display.is_empty() {
         root.put_compound("display", display);
     }
+    if hide_flags != 0 {
+        root.put_byte("HideFlags", hide_flags as i8);
+    }
     if root.is_empty() { None } else { Some(root) }
 }
 
@@ -913,8 +1171,12 @@ pub fn components_to_nbt(
 /// sends is kept in `minecraft:custom_data`.
 static CONSUMED_ROOT_TAGS: &[&str] = &[
     "BlockEntityTag",
+    "CanDestroy",
+    "CanPlaceOn",
     "CustomModelData",
     "CustomPotionColor",
+    "CustomPotionEffects",
+    "custom_potion_effects",
     "Damage",
     "Enchantments",
     "Potion",
@@ -923,12 +1185,225 @@ static CONSUMED_ROOT_TAGS: &[&str] = &[
     "StoredEnchantments",
     "Trim",
     "Unbreakable",
+    "HideFlags",
     "author",
     "map",
     "pages",
     "resolved",
     "title",
 ];
+
+fn legacy_block_predicates(
+    bytes: &[u8],
+    version: V,
+    ids: &ComposedMappings,
+) -> Option<Vec<NbtTag>> {
+    let mut cursor = bytes;
+    let count = cursor.get_var_int().ok()?.0;
+    if !(0..=4096).contains(&count) {
+        return None;
+    }
+    let mut output = Vec::new();
+    for _ in 0..count {
+        let mut blocks = Vec::new();
+        if cursor.get_bool().ok()? {
+            let selector = cursor.get_var_int().ok()?.0;
+            if selector == 0 {
+                blocks.push(format!("#{}", cursor.get_str().ok()?));
+            } else if selector > 0 && selector <= 4097 {
+                for _ in 0..selector - 1 {
+                    let source_id = cursor.get_var_int().ok()?.0;
+                    let Some(target_id) = ids.blocks.map(u32::try_from(source_id).ok()?) else {
+                        continue;
+                    };
+                    let target_id = i32::try_from(target_id).ok()?;
+                    if let Some(name) = registry_entry_name(version, "block", target_id) {
+                        blocks.push(format!("minecraft:{name}"));
+                    }
+                }
+            } else {
+                return None;
+            }
+        }
+
+        let mut properties = Vec::new();
+        let mut has_unrepresentable_property_range = false;
+        if cursor.get_bool().ok()? {
+            let property_count = cursor.get_var_int().ok()?.0;
+            if !(0..=4096).contains(&property_count) {
+                return None;
+            }
+            for _ in 0..property_count {
+                let name = cursor.get_str().ok()?;
+                let exact = cursor.get_bool().ok()?;
+                if exact {
+                    properties.push(format!("{name}={}", cursor.get_str().ok()?));
+                } else {
+                    if cursor.get_bool().ok()? {
+                        cursor.get_str().ok()?; // Lower bound.
+                    }
+                    if cursor.get_bool().ok()? {
+                        cursor.get_str().ok()?; // Upper bound.
+                    }
+                    has_unrepresentable_property_range = true;
+                }
+            }
+        }
+
+        let has_nbt = cursor.get_bool().ok()?;
+        if has_nbt {
+            cursor.get_nbt(&V::V_26_3).ok()?;
+        }
+        let mut component_matchers_cursor = cursor;
+        let component_matcher_count = component_matchers_cursor.get_var_int().ok()?.0;
+        if !(0..=4096).contains(&component_matcher_count) {
+            return None;
+        }
+        item_shape::skip(&Shape::Array(&Shape::Component), &mut cursor).ok()?;
+        let mut item_matchers_cursor = cursor;
+        let item_matcher_count = item_matchers_cursor.get_var_int().ok()?.0;
+        if !(0..=4096).contains(&item_matcher_count) {
+            return None;
+        }
+        item_shape::skip(&Shape::Array(&Shape::VarInt), &mut cursor).ok()?;
+        // Omitting an unsupported predicate must not widen its allow-list.
+        if has_nbt
+            || has_unrepresentable_property_range
+            || component_matcher_count > 0
+            || item_matcher_count > 0
+            || blocks.is_empty()
+        {
+            continue;
+        }
+        for block in blocks {
+            let mut value = block;
+            if !properties.is_empty() {
+                value.push('[');
+                value.push_str(&properties.join(","));
+                value.push(']');
+            }
+            output.push(NbtTag::String(value));
+        }
+    }
+    cursor.is_empty().then_some(output)
+}
+
+fn legacy_block_predicates_from_nbt(list: &[NbtTag]) -> Option<Vec<u8>> {
+    let mut predicates = Vec::new();
+    for value in list {
+        let Some(raw) = value.extract_string() else {
+            continue;
+        };
+        let (block, state) = raw.split_once('[').map_or((raw, None), |(block, state)| {
+            (block, state.strip_suffix(']'))
+        });
+        let is_tag = block.starts_with('#');
+        let bare = block
+            .strip_prefix('#')
+            .unwrap_or(block)
+            .strip_prefix("minecraft:")
+            .unwrap_or_else(|| block.strip_prefix('#').unwrap_or(block));
+        let mut predicate = Vec::new();
+        predicate.write_bool(true).ok()?; // Holder set is present.
+        if is_tag {
+            predicate.write_var_int(&VarInt(0)).ok()?;
+            predicate.write_string(bare).ok()?;
+        } else {
+            let id = registry_entry_id(V::V_26_3, "block", bare)?;
+            predicate.write_var_int(&VarInt(2)).ok()?; // One explicit block id.
+            predicate.write_var_int(&VarInt(id)).ok()?;
+        }
+
+        let properties = state
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|property| property.split_once('='))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        predicate.write_bool(!properties.is_empty()).ok()?;
+        if !properties.is_empty() {
+            predicate
+                .write_var_int(&VarInt(i32::try_from(properties.len()).ok()?))
+                .ok()?;
+            for (name, value) in properties {
+                predicate.write_string(name).ok()?;
+                predicate.write_bool(true).ok()?; // Exact property value.
+                predicate.write_string(value).ok()?;
+            }
+        }
+        predicate.write_bool(false).ok()?; // No block entity NBT condition.
+        predicate.write_var_int(&VarInt(0)).ok()?; // No component matchers.
+        predicate.write_var_int(&VarInt(0)).ok()?; // No extra requirements.
+        predicates.push(predicate);
+    }
+
+    let mut out = Vec::new();
+    out.write_var_int(&VarInt(i32::try_from(predicates.len()).ok()?))
+        .ok()?;
+    for predicate in predicates {
+        out.extend(predicate);
+    }
+    Some(out)
+}
+
+fn legacy_potion_effect_from_nbt(tag: &NbtTag, version: V) -> Option<(i32, Vec<u8>)> {
+    let compound = tag.extract_compound()?;
+    let name = compound
+        .get_string("id")
+        .map(|name| name.strip_prefix("minecraft:").unwrap_or(name).to_owned())
+        .or_else(|| {
+            compound
+                .get("Id")
+                .and_then(extract_int_like)
+                .and_then(|id| registry_entry_name(version, "mob_effect", id))
+                .map(ToOwned::to_owned)
+        })?;
+    let id = registry_entry_id(V::V_26_3, "mob_effect", &name)?;
+    Some((id, potion_effect_data_from_nbt(compound)?))
+}
+
+fn potion_effect_data_from_nbt(compound: &NbtCompound) -> Option<Vec<u8>> {
+    let amplifier = compound
+        .get("Amplifier")
+        .or_else(|| compound.get("amplifier"))
+        .and_then(extract_int_like)
+        .unwrap_or(0);
+    let duration = compound
+        .get("Duration")
+        .or_else(|| compound.get("duration"))
+        .and_then(extract_int_like)
+        .unwrap_or(0);
+    let flag = |upper: &str, lower: &str| {
+        compound
+            .get_bool(upper)
+            .or_else(|| compound.get_bool(lower))
+            .or_else(|| {
+                compound
+                    .get(upper)
+                    .or_else(|| compound.get(lower))
+                    .and_then(extract_int_like)
+                    .map(|value| value != 0)
+            })
+            .unwrap_or(false)
+    };
+    let hidden = compound
+        .get_compound("HiddenEffect")
+        .or_else(|| compound.get_compound("hidden_effect"));
+    let mut out = var_int(amplifier);
+    out.extend(var_int(duration));
+    out.extend([
+        u8::from(flag("Ambient", "ambient")),
+        u8::from(flag("ShowParticles", "show_particles")),
+        u8::from(flag("ShowIcon", "show_icon")),
+        u8::from(hidden.is_some()),
+    ]);
+    if let Some(hidden) = hidden {
+        out.extend(potion_effect_data_from_nbt(hidden)?);
+    }
+    Some(out)
+}
 
 fn profile_from_skull_owner(owner: &NbtTag) -> Option<Profile> {
     let mut profile = Profile::default();
@@ -983,6 +1458,9 @@ fn var_int(value: i32) -> Vec<u8> {
 pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
     let mut out = Vec::new();
     let mut consumed_instrument = false;
+    let hide_flags = nbt.get("HideFlags").and_then(extract_int_like).unwrap_or(0);
+    let mut translated_hide_flags = 0;
+    let mut hidden_components = Vec::new();
 
     if let Some(damage) = nbt.get("Damage").and_then(extract_int_like) {
         out.push(component(DataComponent::Damage, var_int(damage)));
@@ -1005,6 +1483,20 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
     }
     if let Some(value) = nbt.get("map").and_then(extract_int_like) {
         out.push(component(DataComponent::MapId, var_int(value)));
+    }
+    for (key, data_component, hide_flag) in [
+        ("CanPlaceOn", DataComponent::CanPlaceOn, 16),
+        ("CanDestroy", DataComponent::CanBreak, 8),
+    ] {
+        if let Some(list) = nbt.get_list(key)
+            && let Some(data) = legacy_block_predicates_from_nbt(list)
+        {
+            out.push(component(data_component, data));
+            if hide_flags & hide_flag != 0 {
+                hidden_components.push(i32::from(data_component.to_id()));
+                translated_hide_flags |= hide_flag;
+            }
+        }
     }
     for (tag, id) in [
         ("Enchantments", DataComponent::Enchantments),
@@ -1030,7 +1522,16 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
         .and_then(Potion::from_name)
         .map(|potion| i32::from(potion.id));
     let potion_color = nbt.get("CustomPotionColor").and_then(extract_int_like);
-    if potion.is_some() || potion_color.is_some() {
+    let legacy_effects = nbt
+        .get_list("CustomPotionEffects")
+        .or_else(|| nbt.get_list("custom_potion_effects"))
+        .map(|list| {
+            list.iter()
+                .filter_map(|effect| legacy_potion_effect_from_nbt(effect, version))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if potion.is_some() || potion_color.is_some() || !legacy_effects.is_empty() {
         let mut data = Vec::new();
         match potion {
             Some(id) => {
@@ -1046,8 +1547,12 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
             }
             None => data.push(0),
         }
-        // No custom effects and no custom name.
-        data.extend([0, 0]);
+        data.extend(var_int(i32::try_from(legacy_effects.len()).unwrap_or(0)));
+        for (effect_id, effect_data) in legacy_effects {
+            data.extend(var_int(effect_id));
+            data.extend(effect_data);
+        }
+        data.push(0); // No custom potion name.
         out.push(component(DataComponent::PotionContents, data));
     }
     if let Some(profile) = nbt.get("SkullOwner").and_then(profile_from_skull_owner) {
@@ -1129,6 +1634,14 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
             }
         }
     }
+    if !hidden_components.is_empty() {
+        let mut tooltip = vec![0]; // Do not hide every tooltip.
+        tooltip.extend(var_int(i32::try_from(hidden_components.len()).unwrap_or(0)));
+        for id in hidden_components {
+            tooltip.extend(var_int(id));
+        }
+        out.push(component(DataComponent::TooltipDisplay, tooltip));
+    }
     if let Some(display) = nbt.get_compound("display") {
         if let Some(name) = display.get_string("Name") {
             let mut data = Vec::new();
@@ -1177,6 +1690,10 @@ pub fn nbt_to_components(nbt: &NbtCompound, version: V) -> Vec<ItemComponent> {
         {
             custom.put(name, tag.clone());
         }
+    }
+    let unhandled_hide_flags = hide_flags & !translated_hide_flags;
+    if unhandled_hide_flags != 0 {
+        custom.put_int("HideFlags", unhandled_hide_flags);
     }
     if let Some(display) = nbt.get_compound("display") {
         let mut custom_display = display.clone();
@@ -1284,6 +1801,154 @@ mod tests {
         let back = components_to_nbt(&added, V::V_1_16_2, ids()).unwrap();
         assert_eq!(back.get_int("HideFlags"), Some(63));
         assert_eq!(back.get_int("Damage"), Some(3));
+    }
+
+    #[test]
+    fn adventure_predicates_round_trip_with_legacy_hide_flags() {
+        let mut nbt = NbtCompound::new();
+        nbt.put_list(
+            "CanPlaceOn",
+            vec![NbtTag::String("minecraft:stone[axis=y]".into())],
+        );
+        nbt.put_list(
+            "CanDestroy",
+            vec![NbtTag::String("#minecraft:mineable/pickaxe".into())],
+        );
+        // The component-backed bits (8 and 16) become TooltipDisplay, while
+        // unrelated legacy HideFlags stay in CustomData.
+        nbt.put_byte("HideFlags", 63);
+
+        let components = nbt_to_components(&nbt, V::V_1_16_2);
+        assert!(
+            components
+                .iter()
+                .any(|entry| { entry.id == i32::from(DataComponent::CanPlaceOn.to_id()) })
+        );
+        assert!(
+            components
+                .iter()
+                .any(|entry| { entry.id == i32::from(DataComponent::CanBreak.to_id()) })
+        );
+        let tooltip = components
+            .iter()
+            .find(|entry| entry.id == i32::from(DataComponent::TooltipDisplay.to_id()))
+            .expect("legacy HideFlags become per-component tooltip visibility");
+        let mut tooltip_data = tooltip.data.as_slice();
+        assert!(!tooltip_data.get_bool().unwrap());
+        assert_eq!(tooltip_data.get_var_int().unwrap().0, 2);
+        let hidden = [
+            tooltip_data.get_var_int().unwrap().0,
+            tooltip_data.get_var_int().unwrap().0,
+        ];
+        assert!(hidden.contains(&i32::from(DataComponent::CanPlaceOn.to_id())));
+        assert!(hidden.contains(&i32::from(DataComponent::CanBreak.to_id())));
+
+        let back = components_to_nbt(&components, V::V_1_16_2, ids()).unwrap();
+        assert_eq!(back.get_int("HideFlags"), Some(63));
+        assert_eq!(
+            back.get_list("CanPlaceOn").unwrap()[0].extract_string(),
+            Some("minecraft:stone[axis=y]")
+        );
+        assert_eq!(
+            back.get_list("CanDestroy").unwrap()[0].extract_string(),
+            Some("#minecraft:mineable/pickaxe")
+        );
+    }
+
+    #[test]
+    fn legacy_adventure_ranges_are_dropped_instead_of_widened() {
+        let stone = registry_entry_id(V::V_26_3, "block", "stone").unwrap();
+        let mut payload = Vec::new();
+        payload.write_var_int(&VarInt(1)).unwrap(); // one predicate
+        payload.write_bool(true).unwrap(); // holder set present
+        payload.write_var_int(&VarInt(2)).unwrap(); // one explicit block id
+        payload.write_var_int(&VarInt(stone)).unwrap();
+        payload.write_bool(true).unwrap(); // property matchers present
+        payload.write_var_int(&VarInt(1)).unwrap(); // one property
+        payload.write_string("axis").unwrap();
+        payload.write_bool(false).unwrap(); // range, not exact equality
+        payload.write_bool(true).unwrap();
+        payload.write_string("x").unwrap();
+        payload.write_bool(false).unwrap(); // no upper bound
+        payload.write_bool(false).unwrap(); // no NBT matcher
+        payload.write_var_int(&VarInt(0)).unwrap(); // no component matchers
+        payload.write_var_int(&VarInt(0)).unwrap(); // no item matchers
+
+        let rewritten = legacy_block_predicates(&payload, V::V_1_16_2, ids()).unwrap();
+        assert!(
+            rewritten.is_empty(),
+            "dropping an unrepresentable range must not allow every state of the block"
+        );
+    }
+
+    #[test]
+    fn custom_potion_effects_round_trip_through_legacy_nbt() {
+        let source_effect = registry_entry_id(V::V_26_3, "mob_effect", "speed").unwrap();
+        let target_effect = registry_entry_id(V::V_1_16_2, "mob_effect", "speed").unwrap();
+        let mut data = vec![0, 0]; // no base potion or custom color
+        data.extend(var_int(1)); // one custom effect
+        data.extend(var_int(source_effect));
+        data.extend(var_int(1)); // amplifier
+        data.extend(var_int(1200)); // duration
+        data.extend([0, 1, 1, 0]); // ambient, particles, icon, no hidden effect
+        data.push(0); // no custom potion name
+
+        let nbt = components_to_nbt(
+            &[component(DataComponent::PotionContents, data.clone())],
+            V::V_1_16_2,
+            ids(),
+        )
+        .unwrap();
+        let effect = nbt.get_list("CustomPotionEffects").unwrap()[0]
+            .extract_compound()
+            .unwrap();
+        assert_eq!(
+            effect.get("Id").and_then(extract_int_like),
+            Some(target_effect)
+        );
+        let restored = nbt_to_components(&nbt, V::V_1_16_2);
+        assert_eq!(
+            restored
+                .iter()
+                .find(|entry| entry.id == i32::from(DataComponent::PotionContents.to_id()))
+                .map(|entry| entry.data.as_slice()),
+            Some(data.as_slice())
+        );
+    }
+
+    #[test]
+    fn charged_projectiles_become_legacy_crossbow_nbt_items() {
+        let version = V::V_1_16_2;
+        let arrow = i32::from(pumpkin_data::item::Item::ARROW.id);
+        let mut nested = Vec::new();
+        TEMPLATE_ITEM
+            .write(
+                &mut nested,
+                &Item::Structured {
+                    count: 1,
+                    id: arrow,
+                    added: Vec::new(),
+                    removed: Vec::new(),
+                },
+            )
+            .unwrap();
+        let mut payload = var_int(1);
+        payload.extend(nested);
+        let nbt = components_to_nbt(
+            &[component(DataComponent::ChargedProjectiles, payload)],
+            version,
+            ids(),
+        )
+        .unwrap();
+        assert!(nbt.get_bool("Charged").unwrap_or(false));
+        let projectile = nbt.get_list("ChargedProjectiles").unwrap()[0]
+            .extract_compound()
+            .unwrap();
+        assert_eq!(
+            projectile.get_string("id").as_deref(),
+            Some("minecraft:arrow")
+        );
+        assert_eq!(projectile.get_byte("Count"), Some(1));
     }
 
     #[test]

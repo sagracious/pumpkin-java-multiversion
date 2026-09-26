@@ -23,6 +23,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
   PUMPKIN_COMMIT: 94bb6be357b2c8c19ce3294e359bee2b75d7a2e5
   PUMPKIN_TAG: 0.2.0+26.3-26.51
 
@@ -44,6 +46,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: wasm32-wasip2
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.16.0
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check changed Rust formatting
@@ -72,6 +78,8 @@ jobs:
           src/packet/join.rs
           src/packet/recipe_book.rs
           src/packet/recipe_legacy.rs
+          src/packet/mod.rs
+          src/packet/status.rs
           src/packet/chunk_remap.rs
           src/packet/chunk_legacy.rs
           src/packet/update_tags.rs
@@ -96,6 +104,9 @@ jobs:
           src/protocol/v1_16_4to1_16_3.rs
           src/protocol/v1_16to1_15_2.rs
           src/protocol/v1_18to1_17_1.rs
+          src/protocol/v1_19_3to1_19_1.rs
+          src/protocol/v1_21_4to1_21_2.rs
+          src/protocol/v1_21_9to1_21_7.rs
           src/protocol/v26_1to1_21_11.rs
           src/protocol/v26_2to26_1.rs
           src/protocol/v26_3to26_2.rs
@@ -112,6 +123,8 @@ jobs:
         run: |
           cargo test --lib --locked
           cargo build --release --locked --target wasm32-wasip2
+      - name: Show sccache statistics
+        run: sccache --show-stats
       - name: Package artifact
         shell: bash
         run: |

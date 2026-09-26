@@ -20,6 +20,7 @@ use pumpkin_plugin_api::{
 };
 
 use crate::api::{bind_player, is_bound, remove_connection, remove_player};
+use crate::packet::mappings::clientbound;
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -78,10 +79,27 @@ impl EventHandler<ProtocolPacketEvent> for ProtocolPacketHandler {
 }
 
 fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPacketEventData {
+    if is_status_response(&event) && event.protocol_version == 0 {
+        if let Some(payload) = crate::packet::status::rewrite_status_response(
+            &event.raw_payload,
+            JavaMinecraftVersion::V_26_2,
+        ) {
+            event.raw_payload = payload;
+            event.translated = true;
+        }
+        return event;
+    }
     let Some(version) = event_version(event.protocol_version) else {
         return event;
     };
     if version == JavaMinecraftVersion::V_26_3 {
+        if is_status_response(&event)
+            && let Some(payload) =
+                crate::packet::status::rewrite_status_response(&event.raw_payload, version)
+        {
+            event.raw_payload = payload;
+            event.translated = true;
+        }
         return event;
     }
     let state = event.connection_state;
@@ -213,6 +231,13 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
     }
     event
 }
+
+fn is_status_response(event: &ProtocolPacketEventData) -> bool {
+    event.direction == PacketDirection::Clientbound
+        && event.connection_state == 1
+        && event.packet_id == clientbound::status::STATUS_RESPONSE.v26_3
+}
+
 fn event_version(protocol_version: i32) -> Option<JavaMinecraftVersion> {
     let protocol_version = u32::try_from(protocol_version).ok()?;
     let version = JavaMinecraftVersion::from_protocol(protocol_version);
@@ -231,7 +256,8 @@ impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
 
 /// Turns the first login packet for a client below the supported floor into a
 /// disconnect with a readable reason, and drops everything else meant for it.
-/// The status response is left alone since the client already shows itself as incompatible there.
+/// Keep the native protocol number for unsupported status probes so the server
+/// list still shows the supported range in red.
 fn refuse_unsupported(
     mut event: ProtocolPacketEventData,
     version: JavaMinecraftVersion,
@@ -239,6 +265,16 @@ fn refuse_unsupported(
 ) -> ProtocolPacketEventData {
     // 0 handshake, 1 status, 2 login, 3 transfer, 4 config, 5 play.
     if state != 2 && state != 3 {
+        if state == 1
+            && is_status_response(&event)
+            && let Some(payload) = crate::packet::status::rewrite_status_response(
+                &event.raw_payload,
+                JavaMinecraftVersion::V_26_3,
+            )
+        {
+            event.raw_payload = payload;
+            event.translated = true;
+        }
         event.cancelled = state != 1;
         if event.cancelled {
             event.clientbound_packets.clear();
@@ -338,7 +374,58 @@ mod protocol_packet_event_tests {
     use pumpkin_plugin_api::events_wit::{PacketDirection, ProtocolPacketEventData};
     use pumpkin_protocol::ClientPacket;
     use pumpkin_protocol::java::client::config::CRegistryData;
+    use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
     use pumpkin_util::version::JavaMinecraftVersion;
+
+    fn status_payload() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload
+            .write_string(
+                r#"{"version":{"name":"26.3","protocol":777},"players":{"max":50,"online":0,"sample":[]},"description":{"text":"Lobby"}}"#,
+            )
+            .unwrap();
+        payload
+    }
+
+    fn status_event(protocol_version: i32) -> ProtocolPacketEventData {
+        ProtocolPacketEventData {
+            connection_id: 0,
+            player: None,
+            direction: PacketDirection::Clientbound,
+            packet_id: clientbound::status::STATUS_RESPONSE.v26_3,
+            raw_payload: status_payload(),
+            protocol_version,
+            connection_state: 1,
+            translated: false,
+            clientbound_packets: Vec::new(),
+            serverbound_packets: Vec::new(),
+            cancelled: false,
+        }
+    }
+
+    #[test]
+    fn status_probe_without_a_client_version_advertises_a_supported_range() {
+        let response = translate_protocol_packet(status_event(0));
+        assert!(response.translated);
+        assert!(!response.cancelled);
+        let json = response.raw_payload.as_slice().get_str().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["version"]["protocol"], 776);
+        assert_eq!(value["version"]["name"], "1.16.2-26.3");
+    }
+
+    #[test]
+    fn status_probes_keep_native_protocol_for_native_and_unsupported_clients() {
+        for version in [JavaMinecraftVersion::V_26_3, JavaMinecraftVersion::V_1_16_1] {
+            let response = translate_protocol_packet(status_event(version.protocol_version()));
+            assert!(response.translated, "{version}");
+            assert!(!response.cancelled, "{version}");
+            let json = response.raw_payload.as_slice().get_str().unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["version"]["protocol"], 777, "{version}");
+            assert_eq!(value["version"]["name"], "1.16.2-26.3", "{version}");
+        }
+    }
 
     #[test]
     fn translated_legacy_click_keeps_its_clientbound_confirmation_reply() {

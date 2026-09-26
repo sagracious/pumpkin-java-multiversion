@@ -33,15 +33,41 @@ impl StructuredItemRewriter {
         let fallback_model = u32::try_from(source_item_id)
             .ok()
             .and_then(|source_id| ids.custom_model_data.get(&source_id).copied());
+        let legacy_food = if target >= ItemT::FIRST_STRUCTURED && target < V::V_1_21_2 {
+            added
+                .iter()
+                .find(|component| component.id == i32::from(DataComponent::Food.to_id()))
+                .and_then(|food| {
+                    let consumable = added
+                        .iter()
+                        .find(|component| {
+                            component.id == i32::from(DataComponent::Consumable.to_id())
+                        })
+                        .map(|component| component.data.as_slice());
+                    let remainder = added
+                        .iter()
+                        .find(|component| {
+                            component.id == i32::from(DataComponent::UseRemainder.to_id())
+                        })
+                        .map(|component| component.data.as_slice());
+                    item_component::food_to_legacy(&food.data, consumable, remainder, target, ids)
+                        .ok()
+                })
+        } else {
+            None
+        };
 
         if target < ItemT::FIRST_STRUCTURED {
-            let nbt = if let Some(value) = fallback_model {
-                let mut nbt = item_nbt::components_to_nbt(added, target, ids).unwrap_or_default();
-                nbt.put_int("CustomModelData", value);
-                Some(nbt)
-            } else {
-                item_nbt::components_to_nbt(added, target, ids)
-            };
+            let mut nbt = item_nbt::components_to_nbt(added, target, ids);
+            if let Some(value) = fallback_model
+                && nbt
+                    .as_ref()
+                    .and_then(|nbt| nbt.get_int("CustomModelData"))
+                    .is_none()
+            {
+                nbt.get_or_insert_with(pumpkin_nbt::compound::NbtCompound::new)
+                    .put_int("CustomModelData", value);
+            }
             return Item::Nbt {
                 id,
                 count: i8::try_from(*count).unwrap_or(i8::MAX),
@@ -58,6 +84,14 @@ impl StructuredItemRewriter {
             else {
                 continue;
             };
+            if target < V::V_1_21_2
+                && matches!(
+                    native,
+                    DataComponent::Food | DataComponent::Consumable | DataComponent::UseRemainder
+                )
+            {
+                continue;
+            }
             if matches!(
                 native,
                 DataComponent::Enchantments | DataComponent::StoredEnchantments
@@ -71,8 +105,14 @@ impl StructuredItemRewriter {
             let Some(mapped) = map_component_id(component.id, native, target, ids) else {
                 continue;
             };
-            let Some(data) = item_component::to_version(native, &component.data, target, ids)
-            else {
+            let show_in_tooltip = !is_hidden_by_tooltip_display(added, native);
+            let Some(data) = item_component::to_version_with_tooltip(
+                native,
+                &component.data,
+                target,
+                ids,
+                show_in_tooltip,
+            ) else {
                 continue;
             };
             if let Some(existing) = out.iter_mut().find(|existing| existing.id == mapped) {
@@ -83,6 +123,16 @@ impl StructuredItemRewriter {
             } else {
                 out.push(ItemComponent { id: mapped, data });
             }
+        }
+        if let Some(data) = legacy_food
+            && let Some(id) = map_component_id(
+                i32::from(DataComponent::Food.to_id()),
+                DataComponent::Food,
+                target,
+                ids,
+            )
+        {
+            out.push(ItemComponent { id, data });
         }
         if !unsupported_enchantment_lore.is_empty()
             && let Some(lore_id) = map_component_id(
@@ -106,12 +156,9 @@ impl StructuredItemRewriter {
         }
         if let Some(value) = fallback_model
             && let Some(fallback) = via_custom_model_data_component(value, target, ids)
+            && !out.iter().any(|existing| existing.id == fallback.id)
         {
-            if let Some(existing) = out.iter_mut().find(|existing| existing.id == fallback.id) {
-                existing.data = fallback.data;
-            } else {
-                out.push(fallback);
-            }
+            out.push(fallback);
         }
         let mut mapped_removed = Vec::with_capacity(removed.len());
         for component_id in removed {
@@ -196,6 +243,38 @@ impl StructuredItemRewriter {
             }
         }
     }
+}
+
+fn is_hidden_by_tooltip_display(components: &[ItemComponent], component: DataComponent) -> bool {
+    let Some(tooltip) = components
+        .iter()
+        .find(|item| item.id == i32::from(DataComponent::TooltipDisplay.to_id()))
+    else {
+        return false;
+    };
+    let mut cursor = tooltip.data.as_slice();
+    let Ok(hide_tooltip) = cursor.get_bool() else {
+        return true;
+    };
+    if hide_tooltip {
+        return true;
+    }
+    let Ok(count) = cursor.get_var_int() else {
+        return true;
+    };
+    if !(0..=4096).contains(&count.0) {
+        return true;
+    }
+    let id = i32::from(component.to_id());
+    for _ in 0..count.0 {
+        let Ok(hidden) = cursor.get_var_int() else {
+            return true;
+        };
+        if hidden.0 == id {
+            return true;
+        }
+    }
+    false
 }
 
 fn restore_backported_item_id(
@@ -295,10 +374,18 @@ fn read_client_item_with_direction(
             )));
         };
         let data = match body {
-            Some(mut body) => {
-                read_client_payload(native, &mut body, version, &enchantments, from_client, true)?
+            Some(mut body) => read_client_payload(
+                native,
+                &mut body,
+                version,
+                &enchantments,
+                from_client,
+                true,
+                ids,
+            )?,
+            None => {
+                read_client_payload(native, r, version, &enchantments, from_client, false, ids)?
             }
-            None => read_client_payload(native, r, version, &enchantments, from_client, false)?,
         };
         if let Some(data) = data {
             added.push(ItemComponent {
@@ -347,8 +434,22 @@ fn read_client_payload(
     enchantments: &IdMapping,
     from_client: bool,
     length_prefixed: bool,
+    ids: &ComposedMappings,
 ) -> Result<Option<Vec<u8>>, ReadingError> {
     use DataComponent as C;
+    if from_client
+        && version < V::V_26_3
+        && matches!(
+            component,
+            C::ChargedProjectiles
+                | C::BundleContents
+                | C::Container
+                | C::UseRemainder
+                | C::SulfurCubeContent
+        )
+    {
+        return read_nested_item_component(component, r, version, ids, length_prefixed).map(Some);
+    }
     if from_client && version < V::V_26_3 && matches!(component, C::Consumable | C::DeathProtection)
     {
         let len = if length_prefixed {
@@ -382,6 +483,9 @@ fn read_client_payload(
                 version,
                 length_prefixed,
             )
+        }
+        C::JukeboxPlayable => {
+            item_component::legacy_jukebox_playable_to_native(r, version, length_prefixed)
         }
         C::CustomModelData => {
             let value = r.get_var_int()?.0;
@@ -425,6 +529,119 @@ fn read_client_payload(
             Ok(None)
         }
     }
+}
+
+fn read_nested_item_component(
+    component: DataComponent,
+    cursor: &mut &[u8],
+    version: V,
+    ids: &ComposedMappings,
+    payload_is_bounded: bool,
+) -> Result<Vec<u8>, ReadingError> {
+    use DataComponent as C;
+    let mut out = Vec::new();
+    match component {
+        C::UseRemainder | C::SulfurCubeContent => {
+            let item = read_client_template(cursor, version, ids)?;
+            TEMPLATE_ITEM
+                .write(&mut out, &item)
+                .map_err(|error| ReadingError::Message(error.to_string()))?;
+        }
+        C::Container | C::BundleContents | C::ChargedProjectiles => {
+            let count = cursor.get_var_int()?.0;
+            if !(0..=4096).contains(&count) {
+                return Err(ReadingError::Message(
+                    "nested item count out of bounds".into(),
+                ));
+            }
+            out.write_var_int(&VarInt(count))
+                .map_err(|error| ReadingError::Message(error.to_string()))?;
+            for _ in 0..count {
+                if component == C::Container {
+                    let present = cursor.get_bool()?;
+                    out.write_bool(present)
+                        .map_err(|error| ReadingError::Message(error.to_string()))?;
+                    if !present {
+                        continue;
+                    }
+                }
+                let item = read_client_template(cursor, version, ids)?;
+                TEMPLATE_ITEM
+                    .write(&mut out, &item)
+                    .map_err(|error| ReadingError::Message(error.to_string()))?;
+            }
+        }
+        _ => {
+            return Err(ReadingError::Message(
+                "nested item converter used for an unrelated component".into(),
+            ));
+        }
+    }
+    if payload_is_bounded && !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in nested item component: {}",
+            cursor.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn read_client_template(
+    cursor: &mut &[u8],
+    version: V,
+    ids: &ComposedMappings,
+) -> Result<Item, ReadingError> {
+    let client_item_id = cursor.get_var_int()?.0;
+    let count = cursor.get_var_int()?.0;
+    let added_count = cursor.get_var_int()?.0;
+    let removed_count = cursor.get_var_int()?.0;
+    if !(0..=256).contains(&added_count) || !(0..=256).contains(&removed_count) {
+        return Err(ReadingError::Message(
+            "nested component count out of bounds".into(),
+        ));
+    }
+    let mut added = Vec::with_capacity(added_count as usize);
+    let component_ids = ids.data_component_type_inverse();
+    let enchantments = ids.enchantments.inverse();
+    for _ in 0..added_count {
+        let client_id = cursor.get_var_int()?.0;
+        let Some(native) = map_component_id_from_client(client_id, version, component_ids)
+            .and_then(|id| u8::try_from(id).ok())
+            .and_then(DataComponent::try_from_id)
+        else {
+            if client_component_is_empty(client_id, version) {
+                continue;
+            }
+            return Err(ReadingError::Message(format!(
+                "unknown nested component {client_id} on {version}"
+            )));
+        };
+        if let Some(data) =
+            read_client_payload(native, cursor, version, &enchantments, true, false, ids)?
+        {
+            added.push(ItemComponent {
+                id: i32::from(native.to_id()),
+                data,
+            });
+        }
+    }
+    let mut removed = Vec::with_capacity(removed_count as usize);
+    for _ in 0..removed_count {
+        if let Some(id) =
+            map_component_id_from_client(cursor.get_var_int()?.0, version, component_ids)
+        {
+            removed.push(id);
+        }
+    }
+    let Some(id) = map(ids.items_inverse(), client_item_id) else {
+        return Ok(Item::Empty);
+    };
+    Ok(Item::Structured {
+        count,
+        id,
+        added,
+        removed,
+    })
 }
 
 fn native_enchantments(native: &[u8], enchantments: &IdMapping) -> Result<Vec<u8>, ReadingError> {
@@ -612,13 +829,16 @@ fn skip_client_payload(
             r.get_var_int()?;
             r.get_f32_be()?;
             r.get_bool()?;
-            r.get_f32_be()?;
-            ItemT::for_version(version)
-                .read(r)
-                .map_err(|error| ReadingError::Message(error.to_string()))?;
+            if version >= V::V_1_21 {
+                r.get_f32_be()?;
+                ItemT::for_version(version)
+                    .read(r)
+                    .map_err(|error| ReadingError::Message(error.to_string()))?;
+            }
             let effects = r.get_var_int()?.0;
             for _ in 0..effects {
                 r.get_var_int()?;
+                super::item_shape::skip_effect_parameters(r)?;
                 r.get_f32_be()?;
             }
         }
@@ -824,7 +1044,7 @@ pub(crate) fn map_component_id_from_client(id: i32, source: V, inverse: &IdMappi
 mod tests {
     use super::*;
     use crate::api::MappingData;
-    use crate::api::types::{BOOL, I8, NbtT, VAR_INT};
+    use crate::api::types::{BOOL, I8, NbtT, TEMPLATE_ITEM, VAR_INT};
 
     fn ids(target: V) -> &'static ComposedMappings {
         MappingData::get().composed(target)
@@ -908,6 +1128,203 @@ mod tests {
             StructuredItemRewriter::to_native(&legacy, old_target, old_ids).item_id(),
             Some(72)
         );
+    }
+
+    #[test]
+    fn via_item_fallback_preserves_explicit_custom_model_data() {
+        let source_component = i32::from(DataComponent::CustomModelData.to_id());
+        let mut native_model = Vec::new();
+        VAR_INT.write(&mut native_model, &VarInt(1)).unwrap();
+        native_model.write_f32_be(42.0).unwrap();
+        for _ in 0..3 {
+            VAR_INT.write(&mut native_model, &VarInt(0)).unwrap();
+        }
+        let native = Item::Structured {
+            count: 1,
+            id: 72,
+            added: vec![ItemComponent {
+                id: source_component,
+                data: native_model.clone(),
+            }],
+            removed: Vec::new(),
+        };
+
+        let target = V::V_26_2;
+        let mappings = ids(target);
+        let structured = StructuredItemRewriter::to_version(&native, target, mappings);
+        let Item::Structured { added, .. } = structured else {
+            panic!("the modern item fallback remains structured");
+        };
+        let custom_model_id = map_component_id(
+            source_component,
+            DataComponent::CustomModelData,
+            target,
+            mappings,
+        )
+        .unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .find(|component| component.id == custom_model_id)
+                .expect("the explicit custom model data remains")
+                .data,
+            native_model
+        );
+
+        let target = V::V_1_20_3;
+        let legacy = StructuredItemRewriter::to_version(&native, target, ids(target));
+        let Item::Nbt {
+            nbt: Some(pumpkin_nbt::tag::NbtTag::Compound(nbt)),
+            ..
+        } = legacy
+        else {
+            panic!("the older client receives an NBT item");
+        };
+        assert_eq!(
+            nbt.get_int("CustomModelData"),
+            Some(42),
+            "the mapping fallback does not replace an explicit model value"
+        );
+    }
+
+    #[test]
+    fn nested_projectile_items_map_back_to_native_item_and_component_ids() {
+        let target = V::V_1_20_5;
+        let mappings = ids(target);
+        let source_item = i32::from(pumpkin_data::item::Item::PAPER.id);
+        let client_item = map(mappings.items, source_item).unwrap();
+        let damage_id = i32::from(DataComponent::Damage.to_id());
+        let client_damage =
+            map_component_id(damage_id, DataComponent::Damage, target, mappings).unwrap();
+        let mut damage_payload = Vec::new();
+        VAR_INT.write(&mut damage_payload, &VarInt(7)).unwrap();
+        let template = Item::Structured {
+            count: 1,
+            id: client_item,
+            added: vec![ItemComponent {
+                id: client_damage,
+                data: damage_payload.clone(),
+            }],
+            removed: Vec::new(),
+        };
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(1)).unwrap();
+        TEMPLATE_ITEM.write(&mut payload, &template).unwrap();
+        let mut cursor = payload.as_slice();
+        let native = read_nested_item_component(
+            DataComponent::ChargedProjectiles,
+            &mut cursor,
+            target,
+            mappings,
+            true,
+        )
+        .unwrap();
+        assert!(cursor.is_empty());
+        let mut native_cursor = native.as_slice();
+        assert_eq!(VAR_INT.read(&mut native_cursor).unwrap().0, 1);
+        let template = TEMPLATE_ITEM.read(&mut native_cursor).unwrap();
+        assert!(native_cursor.is_empty());
+        assert_eq!(template.item_id(), Some(source_item));
+        let Item::Structured { added, .. } = template else {
+            panic!("nested projectile stays structured");
+        };
+        assert!(added.contains(&ItemComponent {
+            id: damage_id,
+            data: damage_payload,
+        }));
+    }
+
+    #[test]
+    fn food_downgrades_with_its_remainder_and_status_effects_for_1_21_1() {
+        let target = V::V_1_21;
+        let mappings = ids(target);
+        let food_id = i32::from(DataComponent::Food.to_id());
+        let effect_id = item_component::registry_entry_id(V::V_26_3, "mob_effect", "speed")
+            .expect("speed exists in the source effect registry");
+        let mut food = Vec::new();
+        VAR_INT.write(&mut food, &VarInt(5)).unwrap();
+        food.write_f32_be(2.5).unwrap();
+        food.write_bool(true).unwrap();
+
+        let mut consumable = Vec::new();
+        consumable.write_f32_be(2.25).unwrap();
+        VAR_INT.write(&mut consumable, &VarInt(0)).unwrap(); // animation
+        VAR_INT.write(&mut consumable, &VarInt(1)).unwrap(); // sound holder
+        consumable.write_bool(true).unwrap();
+        VAR_INT.write(&mut consumable, &VarInt(1)).unwrap(); // consume effects
+        VAR_INT.write(&mut consumable, &VarInt(0)).unwrap(); // apply status effects
+        VAR_INT.write(&mut consumable, &VarInt(1)).unwrap(); // status effects
+        VAR_INT.write(&mut consumable, &VarInt(effect_id)).unwrap();
+        VAR_INT.write(&mut consumable, &VarInt(1)).unwrap(); // amplifier
+        VAR_INT.write(&mut consumable, &VarInt(600)).unwrap(); // duration
+        consumable.extend([0, 1, 1, 0]); // ambient, particles, icon, no hidden effect
+        consumable.write_f32_be(0.75).unwrap(); // probability
+
+        let remainder = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::GLASS_BOTTLE.id),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        let mut remainder_payload = Vec::new();
+        TEMPLATE_ITEM
+            .write(&mut remainder_payload, &remainder)
+            .unwrap();
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::HONEY_BOTTLE.id),
+            added: vec![
+                ItemComponent {
+                    id: food_id,
+                    data: food,
+                },
+                ItemComponent {
+                    id: i32::from(DataComponent::Consumable.to_id()),
+                    data: consumable,
+                },
+                ItemComponent {
+                    id: i32::from(DataComponent::UseRemainder.to_id()),
+                    data: remainder_payload,
+                },
+            ],
+            removed: Vec::new(),
+        };
+
+        let Item::Structured { added, .. } =
+            StructuredItemRewriter::to_version(&native, target, mappings)
+        else {
+            panic!("food item remains structured");
+        };
+        let target_food_id =
+            map_component_id(food_id, DataComponent::Food, target, mappings).unwrap();
+        let payload = added
+            .iter()
+            .find(|component| component.id == target_food_id)
+            .expect("the client receives the old FoodProperties component");
+        let mut cursor = payload.data.as_slice();
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 5);
+        assert_eq!(cursor.get_f32_be().unwrap(), 2.5);
+        assert!(cursor.get_bool().unwrap());
+        assert_eq!(cursor.get_f32_be().unwrap(), 2.25);
+        let remainder = ItemT::for_version(target).read(&mut cursor).unwrap();
+        assert_eq!(
+            remainder.item_id(),
+            map(
+                mappings.items,
+                i32::from(pumpkin_data::item::Item::GLASS_BOTTLE.id)
+            )
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 1);
+        assert_eq!(
+            VAR_INT.read(&mut cursor).unwrap().0,
+            item_component::registry_entry_id(target, "mob_effect", "speed").unwrap()
+        );
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 1);
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 600);
+        assert_eq!(&cursor[..4], &[0, 1, 1, 0]);
+        cursor = &cursor[4..];
+        assert_eq!(cursor.get_f32_be().unwrap(), 0.75);
+        assert!(cursor.is_empty());
     }
 
     #[test]

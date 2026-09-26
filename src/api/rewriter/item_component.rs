@@ -6,7 +6,7 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::ComposedMappings;
 use crate::api::rewriter::item_shape::{self, Shape};
-use crate::api::types::{TEMPLATE_ITEM, WireType};
+use crate::api::types::{ItemT, TEMPLATE_ITEM, WireType};
 
 /// Scratch buffers cannot run out of room, so the write errors of a byte
 /// transform are reported as reading errors.
@@ -59,6 +59,19 @@ pub fn to_version(
     target: V,
     ids: &ComposedMappings,
 ) -> Option<Vec<u8>> {
+    to_version_with_tooltip(component, native, target, ids, true)
+}
+
+/// The 26.3 payload of a component in `target`'s layout, carrying its
+/// component-specific visibility from the 26.3 tooltip display.
+#[must_use]
+pub fn to_version_with_tooltip(
+    component: DataComponent,
+    native: &[u8],
+    target: V,
+    ids: &ComposedMappings,
+    show_in_tooltip: bool,
+) -> Option<Vec<u8>> {
     let mapped = map_nested_ids(component, native, target, ids).ok()?;
     if target >= V::V_26_3 {
         return Some(mapped);
@@ -66,13 +79,16 @@ pub fn to_version(
     if target >= shape_floor(component) {
         return Some(mapped);
     }
-    adapt(component, mapped, target).ok().flatten()
+    adapt(component, mapped, target, show_in_tooltip)
+        .ok()
+        .flatten()
 }
 
 fn adapt(
     component: DataComponent,
     native: Vec<u8>,
     target: V,
+    show_in_tooltip: bool,
 ) -> Result<Option<Vec<u8>>, ReadingError> {
     use DataComponent as C;
     let out = match component {
@@ -88,9 +104,19 @@ fn adapt(
             out
         }
         C::JukeboxPlayable if target >= V::V_1_21 => {
+            let mut cursor = native.as_slice();
+            let id = cursor.get_var_int()?.0;
+            if !cursor.is_empty() {
+                return Err(ReadingError::Message(
+                    "trailing bytes in jukebox-playable component".into(),
+                ));
+            }
+            let holder_id = id
+                .checked_add(1)
+                .ok_or_else(|| ReadingError::Message("jukebox-song holder id overflow".into()))?;
             let mut out = Vec::with_capacity(native.len() + 2);
             out.push(1);
-            out.extend_from_slice(&native);
+            out.write_var_int(&VarInt(holder_id)).r()?;
             if target <= V::V_1_21_4 {
                 out.push(1);
             }
@@ -112,14 +138,15 @@ fn adapt(
             Some(out) => out,
             None => return Ok(None),
         },
+        C::CanPlaceOn | C::CanBreak => adventure_mode_predicates(&native, show_in_tooltip)?,
         C::EntityData | C::BlockEntityData => {
             let mut cursor = native.as_slice();
             cursor.get_var_int()?;
             cursor.to_vec()
         }
         C::Profile => profile(&native)?,
-        // can_place_on, can_break, intangible_projectile, custom_model_data,
-        // food and anything else whose shape moved has no converter.
+        // intangible_projectile, custom_model_data, food and anything else
+        // whose shape moved has no converter.
         _ => return Ok(None),
     };
     Ok(Some(out))
@@ -288,6 +315,9 @@ fn map_nested_ids(
         ),
         C::Instrument => map_holder_ids(V::V_26_3, target, native, &["instrument"]),
         C::ProvidesTrimMaterial => map_holder_ids(V::V_26_3, target, native, &["trim_material"]),
+        C::JukeboxPlayable if target < V::V_26_3 => {
+            map_registry_value(V::V_26_3, target, native, "jukebox_song")
+        }
         C::Enchantments | C::StoredEnchantments => enchantment_ids(native, ids),
         C::AttributeModifiers => attribute_ids(native, ids),
         C::MapDecorations if target < V::V_26_3 => map_decoration_types(native),
@@ -297,10 +327,131 @@ fn map_nested_ids(
         C::EntityData => leading_id(native, &ids.entities),
         C::BlockEntityData => leading_id(native, &ids.blockentities),
         C::PaintingVariant => holder_id(native, &ids.paintings),
-        C::BundleContents => nested_stacks(native, target, ids, false),
-        C::Container => nested_stacks(native, target, ids, true),
+        C::CanPlaceOn | C::CanBreak => map_block_predicates(native, target, ids),
+        C::ChargedProjectiles | C::BundleContents if target >= V::V_1_20_5 => {
+            nested_stack_array(native, target, ids)
+        }
+        C::Container if target >= V::V_1_20_5 => nested_stacks(native, target, ids, true),
+        C::UseRemainder | C::SulfurCubeContent if target >= V::V_1_20_5 => {
+            nested_stack(native, target, ids)
+        }
         _ => Ok(native.to_vec()),
     }
+}
+
+fn map_block_predicates(
+    native: &[u8],
+    _target: V,
+    ids: &ComposedMappings,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let count = cursor.get_var_int()?.0;
+    if !(0..=4096).contains(&count) {
+        return Err(ReadingError::Message(
+            "block predicate count out of bounds".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(native.len());
+    out.write_var_int(&VarInt(count)).r()?;
+    for _ in 0..count {
+        let has_blocks = cursor.get_bool()?;
+        out.write_bool(has_blocks).r()?;
+        if has_blocks {
+            map_block_id_set(&mut cursor, &mut out, &ids.blocks)?;
+        }
+        for shape in [
+            Shape::Opt(&Shape::Array(&Shape::Seq(&[
+                Shape::Str,
+                Shape::BoolSwitch(&STR, &Shape::Seq(&[Shape::Opt(&STR), Shape::Opt(&STR)])),
+            ]))),
+            Shape::Opt(&NBT),
+            Shape::Array(&Shape::Component),
+            Shape::Array(&VAR_INT),
+        ] {
+            copy_shape(&shape, &mut cursor, &mut out)?;
+        }
+    }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in adventure predicates: {}",
+            cursor.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn map_block_id_set(
+    cursor: &mut &[u8],
+    out: &mut Vec<u8>,
+    mapping: &crate::api::IdMapping,
+) -> Result<(), ReadingError> {
+    let selector = cursor.get_var_int()?.0;
+    if selector < 0 || selector > 4097 {
+        return Err(ReadingError::Message(
+            "block holder set out of bounds".into(),
+        ));
+    }
+    if selector == 0 {
+        out.write_var_int(&VarInt(0)).r()?;
+        out.write_string(&cursor.get_str()?).r()?;
+        return Ok(());
+    }
+
+    let mut mapped = Vec::with_capacity((selector - 1) as usize);
+    for _ in 0..selector - 1 {
+        if let Some(id) = map(mapping, cursor.get_var_int()?.0) {
+            mapped.push(id);
+        }
+    }
+    out.write_var_int(&VarInt(
+        i32::try_from(mapped.len())
+            .map_err(|_| ReadingError::Message("block holder set too large".into()))?
+            + 1,
+    ))
+    .r()?;
+    for id in mapped {
+        out.write_var_int(&VarInt(id)).r()?;
+    }
+    Ok(())
+}
+
+fn adventure_mode_predicates(
+    native: &[u8],
+    show_in_tooltip: bool,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let count = cursor.get_var_int()?.0;
+    if !(0..=4096).contains(&count) {
+        return Err(ReadingError::Message(
+            "block predicate count out of bounds".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(native.len());
+    out.write_var_int(&VarInt(count)).r()?;
+    for _ in 0..count {
+        for shape in [
+            Shape::Opt(&ID_SET),
+            Shape::Opt(&Shape::Array(&Shape::Seq(&[
+                Shape::Str,
+                Shape::BoolSwitch(&STR, &Shape::Seq(&[Shape::Opt(&STR), Shape::Opt(&STR)])),
+            ]))),
+            Shape::Opt(&NBT),
+        ] {
+            copy_shape(&shape, &mut cursor, &mut out)?;
+        }
+        // 1.21.5 added data-component matchers to adventure predicates. Via
+        // deliberately drops them when it writes the 1.21.4 predicate form.
+        skip(&Shape::Array(&Shape::Component), &mut cursor)?;
+        skip(&Shape::Array(&VAR_INT), &mut cursor)?;
+    }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in adventure predicates: {}",
+            cursor.len()
+        )));
+    }
+    out.write_bool(show_in_tooltip).r()?;
+    Ok(out)
 }
 
 fn map_holder_ids(
@@ -341,6 +492,32 @@ fn map_holder_ids(
     Ok(output)
 }
 
+/// Maps a registry-backed component whose payload is a direct registry id.
+fn map_registry_value(
+    source: V,
+    target: V,
+    payload: &[u8],
+    registry_id: &str,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = payload;
+    let source_id = cursor.get_var_int()?.0;
+    let source_name = registry_entry_name(source, registry_id, source_id).ok_or_else(|| {
+        ReadingError::Message(format!("unknown {source} {registry_id} id {source_id}"))
+    })?;
+    let target_id = registry_entry_id(target, registry_id, source_name).ok_or_else(|| {
+        ReadingError::Message(format!("{target} has no {registry_id} entry {source_name}"))
+    })?;
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in registry-backed item component: {}",
+            cursor.len()
+        )));
+    }
+    let mut out = Vec::new();
+    out.write_var_int(&VarInt(target_id)).r()?;
+    Ok(out)
+}
+
 /// Rewrites registry ids in a client item component to Pumpkin's 26.3 ids.
 /// Components whose codecs have no nested registry ids pass through unchanged.
 pub fn registry_ids_to_native(
@@ -353,9 +530,62 @@ pub fn registry_ids_to_native(
         C::Trim => &["trim_material", "trim_pattern"][..],
         C::Instrument => &["instrument"][..],
         C::ProvidesTrimMaterial => &["trim_material"][..],
+        C::JukeboxPlayable => {
+            return map_registry_value(version, V::V_26_3, client, "jukebox_song");
+        }
         _ => return Ok(client.to_vec()),
     };
     map_holder_ids(version, V::V_26_3, client, registries)
+}
+
+/// Converts older jukebox-playable layouts to the canonical direct registry id.
+/// Inline datapack songs are consumed but left unrepresentable; when the item
+/// came from the server, the per-connection backup restores its source value.
+pub(crate) fn legacy_jukebox_playable_to_native(
+    payload: &mut &[u8],
+    version: V,
+    payload_is_bounded: bool,
+) -> Result<Option<Vec<u8>>, ReadingError> {
+    let id = if payload.get_bool()? {
+        let holder_id = payload.get_var_int()?.0;
+        if holder_id == 0 {
+            item_shape::skip(&Shape::Sound, payload)?;
+            payload.get_nbt(&version)?;
+            payload.get_f32_be()?;
+            payload.get_var_int()?;
+            None
+        } else {
+            let source_id = holder_id
+                .checked_sub(1)
+                .ok_or_else(|| ReadingError::Message("invalid jukebox-song holder id".into()))?;
+            let name =
+                registry_entry_name(version, "jukebox_song", source_id).ok_or_else(|| {
+                    ReadingError::Message(format!(
+                        "unknown {version} jukebox_song holder id {holder_id}"
+                    ))
+                })?;
+            registry_entry_id(V::V_26_3, "jukebox_song", name)
+        }
+    } else {
+        let name = payload.get_str()?;
+        let bare = name.strip_prefix("minecraft:").unwrap_or(&name);
+        registry_entry_id(V::V_26_3, "jukebox_song", bare)
+    };
+    if version <= V::V_1_21_4 {
+        payload.get_bool()?;
+    }
+    if payload_is_bounded && !payload.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in jukebox-playable component: {}",
+            payload.len()
+        )));
+    }
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    out.write_var_int(&VarInt(id)).r()?;
+    Ok(Some(out))
 }
 
 pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Option<&'static str> {
@@ -706,7 +936,12 @@ fn holder_id(native: &[u8], mapping: &crate::api::IdMapping) -> Result<Vec<u8>, 
     if raw == 0 {
         return Ok(native.to_vec());
     }
-    let mapped = map(mapping, raw - 1).map_or(0, |id| id + 1);
+    let source_id = raw
+        .checked_sub(1)
+        .ok_or_else(|| ReadingError::Message("invalid registry holder id".into()))?;
+    let mapped = map(mapping, source_id)
+        .and_then(|id| id.checked_add(1))
+        .ok_or_else(|| ReadingError::Message("unmapped registry holder id".into()))?;
     let mut out = Vec::with_capacity(native.len());
     out.write_var_int(&VarInt(mapped)).r()?;
     out.write_slice(cursor).r()?;
@@ -723,6 +958,11 @@ fn nested_stacks(
 ) -> Result<Vec<u8>, ReadingError> {
     let mut cursor = native;
     let count = cursor.get_var_int()?;
+    if !(0..=4096).contains(&count.0) {
+        return Err(ReadingError::Message(
+            "nested item count out of bounds".into(),
+        ));
+    }
     let mut out = Vec::with_capacity(native.len());
     out.write_var_int(&count).r()?;
     for _ in 0..count.0 {
@@ -737,6 +977,55 @@ fn nested_stacks(
         let rewritten = super::item::StructuredItemRewriter::to_version(&template, target, ids);
         TEMPLATE_ITEM.write(&mut out, &rewritten).r()?;
     }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in nested item list: {}",
+            cursor.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn nested_stack_array(
+    native: &[u8],
+    target: V,
+    ids: &ComposedMappings,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let count = cursor.get_var_int()?;
+    if !(0..=4096).contains(&count.0) {
+        return Err(ReadingError::Message(
+            "nested item count out of bounds".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(native.len());
+    out.write_var_int(&count).r()?;
+    for _ in 0..count.0 {
+        let template = TEMPLATE_ITEM.read(&mut cursor)?;
+        let rewritten = super::item::StructuredItemRewriter::to_version(&template, target, ids);
+        TEMPLATE_ITEM.write(&mut out, &rewritten).r()?;
+    }
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in nested item list: {}",
+            cursor.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn nested_stack(native: &[u8], target: V, ids: &ComposedMappings) -> Result<Vec<u8>, ReadingError> {
+    let mut cursor = native;
+    let template = TEMPLATE_ITEM.read(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(ReadingError::Message(format!(
+            "trailing bytes in nested item: {}",
+            cursor.len()
+        )));
+    }
+    let rewritten = super::item::StructuredItemRewriter::to_version(&template, target, ids);
+    let mut out = Vec::new();
+    TEMPLATE_ITEM.write(&mut out, &rewritten).r()?;
     Ok(out)
 }
 
@@ -825,6 +1114,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adventure_predicates_keep_block_sets_and_tooltip_visibility() {
+        let target = V::V_1_21_4;
+        let mappings = crate::api::MappingData::get().composed(target);
+        let source_block = registry_value_id(V::V_26_3, "block", "stone");
+        let mapped_block = mappings.blocks.map(source_block as u32).unwrap() as i32;
+        let mut native = Vec::new();
+        VAR_INT.write(&mut native, &VarInt(1)).unwrap(); // predicates
+        native.push(1); // block holder set is present
+        VAR_INT.write(&mut native, &VarInt(2)).unwrap(); // one explicit block id
+        VAR_INT.write(&mut native, &VarInt(source_block)).unwrap();
+        native.extend([0, 0]); // no property or NBT predicates
+        VAR_INT.write(&mut native, &VarInt(0)).unwrap(); // no component matchers
+        VAR_INT.write(&mut native, &VarInt(0)).unwrap(); // no extra requirements
+
+        for component in [DataComponent::CanPlaceOn, DataComponent::CanBreak] {
+            for show_in_tooltip in [true, false] {
+                let encoded =
+                    to_version_with_tooltip(component, &native, target, mappings, show_in_tooltip)
+                        .expect("1.21.4 retains the adventure block predicate");
+                let mut cursor = encoded.as_slice();
+                assert_eq!(cursor.get_var_int().unwrap().0, 1);
+                assert!(cursor.get_bool().unwrap());
+                assert_eq!(cursor.get_var_int().unwrap().0, 2);
+                assert_eq!(cursor.get_var_int().unwrap().0, mapped_block);
+                assert!(!cursor.get_bool().unwrap());
+                assert!(!cursor.get_bool().unwrap());
+                assert_eq!(cursor.get_bool().unwrap(), show_in_tooltip);
+                assert!(cursor.is_empty());
+            }
+        }
+    }
+
     /// `md('1.21.4')` types `unbreakable` as `bool`, `md('1.21.5')` as `void`.
     #[test]
     fn unbreakable_is_a_bool_below_1_21_5() {
@@ -845,18 +1167,107 @@ mod tests {
         );
     }
 
-    /// `md('1.21.4')` has no `can_place_on` that matches 26.3's, and nothing
-    /// converts it, so it must not be sent as it is.
+    /// Components without a safe converter remain fail-closed.
     #[test]
     fn a_component_without_a_converter_is_dropped() {
         assert_eq!(
-            to_version(DataComponent::CanPlaceOn, &[0, 1], V::V_1_21_4, ids()),
+            to_version(
+                DataComponent::IntangibleProjectile,
+                &[0],
+                V::V_1_21_4,
+                ids()
+            ),
             None
         );
     }
 
     #[test]
+    fn jukebox_song_ids_map_by_name_and_inline_songs_are_consumed() {
+        let target = V::V_1_21_4;
+        let source_id = registry_value_id(V::V_26_3, "jukebox_song", "cat");
+        let target_id = registry_value_id(target, "jukebox_song", "cat");
+        let mut native = Vec::new();
+        VAR_INT.write(&mut native, &VarInt(source_id)).unwrap();
+        let mut expected = vec![1]; // the older holder arm
+        VAR_INT
+            .write(&mut expected, &VarInt(target_id + 1))
+            .unwrap();
+        expected.push(1); // visible in the legacy tooltip
+        assert_eq!(
+            to_version(
+                DataComponent::JukeboxPlayable,
+                &native,
+                target,
+                crate::api::MappingData::get().composed(target),
+            ),
+            Some(expected)
+        );
+
+        let mut holder = vec![1];
+        VAR_INT.write(&mut holder, &VarInt(target_id + 1)).unwrap();
+        holder.push(1); // 1.21.4 show_in_tooltip
+        holder.push(0x7f); // next unlength-prefixed component
+        let mut cursor = holder.as_slice();
+        assert_eq!(
+            legacy_jukebox_playable_to_native(&mut cursor, target, false).unwrap(),
+            Some(native.clone())
+        );
+        assert_eq!(cursor, &[0x7f]);
+
+        let mut inline = vec![1, 0, 0]; // holder arm; inline song; inline sound
+        inline.write_string("minecraft:music_disc.cat").unwrap();
+        inline.push(0); // no fixed range
+        inline.push(0); // no song description NBT
+        inline.extend(180.0_f32.to_bits().to_be_bytes());
+        VAR_INT.write(&mut inline, &VarInt(15)).unwrap();
+        inline.push(1); // 1.21.4 show_in_tooltip
+        inline.push(0x7f);
+        let mut cursor = inline.as_slice();
+        assert_eq!(
+            legacy_jukebox_playable_to_native(&mut cursor, target, false).unwrap(),
+            None,
+            "dynamic inline jukebox data cannot become a static registry id"
+        );
+        assert_eq!(cursor, &[0x7f]);
+    }
+
+    #[test]
     fn trim_instrument_and_material_holder_ids_map_by_registry_name() {
+        let target = V::V_1_20_5;
+        let ids = crate::api::MappingData::get().composed(target);
+        let mut native = Vec::new();
+        VAR_INT
+            .write(
+                &mut native,
+                &VarInt(registry_value_id(V::V_26_3, "instrument", "ponder_goat_horn") + 1),
+            )
+            .unwrap();
+        let encoded = to_version(DataComponent::Instrument, &native, target, ids).unwrap();
+        let mut shared = encoded.clone();
+        shared.extend([0x55, 0x66]); // Following component/header bytes.
+        let mut cursor = shared.as_slice();
+        assert_eq!(
+            legacy_registry_component_to_native(
+                DataComponent::Instrument,
+                &mut cursor,
+                target,
+                false,
+            )
+            .unwrap(),
+            Some(native.clone())
+        );
+        assert_eq!(cursor, &[0x55, 0x66]);
+        let mut bounded = shared.as_slice();
+        assert!(
+            legacy_registry_component_to_native(
+                DataComponent::Instrument,
+                &mut bounded,
+                target,
+                true,
+            )
+            .is_err()
+        );
+
         let target = V::V_1_21_5;
         let ids = crate::api::MappingData::get().composed(target);
         let mut native_trim = Vec::new();
@@ -1203,6 +1614,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unmappable_painting_holder_is_rejected_instead_of_becoming_inline() {
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(-1)).unwrap();
+        assert!(holder_id(&payload, &ids().paintings).is_err());
+    }
+
+    #[test]
+    fn nested_item_lists_reject_negative_counts() {
+        let mut payload = Vec::new();
+        VAR_INT.write(&mut payload, &VarInt(-1)).unwrap();
+        assert!(nested_stacks(&payload, V::V_1_21_5, ids(), true).is_err());
+        assert!(nested_stack_array(&payload, V::V_1_21_5, ids()).is_err());
+    }
+
     fn consume_effect_component_payload(
         component: DataComponent,
         directional_particles: Option<bool>,
@@ -1318,6 +1744,148 @@ fn copy_consume_effect(
                 let directional = cursor.get_bool()?;
                 if output_has_directional_particles {
                     out.write_bool(directional).r()?;
+                }
+            } else if output_has_directional_particles {
+                out.write_bool(true).r()?;
+            }
+        }
+        4 => copy_shape(&Shape::Sound, cursor, out)?,
+        other => {
+            return Err(ReadingError::Message(format!(
+                "unknown consume effect {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Combines 26.3 food data with its consumable effects and use remainder for
+/// the pre-1.21.2 FoodProperties component.
+pub fn food_to_legacy(
+    food: &[u8],
+    consumable: Option<&[u8]>,
+    remainder: Option<&[u8]>,
+    target: V,
+    ids: &ComposedMappings,
+) -> Result<Vec<u8>, ReadingError> {
+    let mut food_cursor = food;
+    let nutrition = food_cursor.get_var_int()?;
+    let saturation = food_cursor.get_f32_be()?;
+    let can_always_eat = food_cursor.get_bool()?;
+    if !food_cursor.is_empty() {
+        return Err(ReadingError::Message(
+            "trailing bytes in food component".into(),
+        ));
+    }
+
+    let mut eat_seconds = 1.6;
+    let mut effects = Vec::new();
+    if let Some(consumable) = consumable {
+        let mut cursor = consumable;
+        eat_seconds = cursor.get_f32_be()?;
+        cursor.get_var_int()?; // Animation.
+        skip(&SOUND, &mut cursor)?;
+        cursor.get_bool()?; // Consume particles.
+        let count = cursor.get_var_int()?.0;
+        if !(0..=4096).contains(&count) {
+            return Err(ReadingError::Message(
+                "consume effect count out of bounds".into(),
+            ));
+        }
+        for _ in 0..count {
+            let effect_type = cursor.get_var_int()?.0;
+            if effect_type != 0 {
+                // Via only maps apply_status_effects into the old food list.
+                let mut encoded = Vec::new();
+                encoded.write_var_int(&VarInt(effect_type)).r()?;
+                copy_consume_effect_tail(&mut cursor, &mut encoded, effect_type, true, false)?;
+                continue;
+            }
+
+            let status_count = cursor.get_var_int()?.0;
+            if !(0..=4096).contains(&status_count) {
+                return Err(ReadingError::Message(
+                    "food effect count out of bounds".into(),
+                ));
+            }
+            let mut statuses = Vec::with_capacity(status_count as usize);
+            for _ in 0..status_count {
+                let source_id = cursor.get_var_int()?.0;
+                let data_start = cursor;
+                item_shape::skip_effect_parameters(&mut cursor)?;
+                let data = data_start[..data_start.len() - cursor.len()].to_vec();
+                let target_id = registry_entry_name(V::V_26_3, "mob_effect", source_id)
+                    .and_then(|name| registry_entry_id(target, "mob_effect", name));
+                if let Some(target_id) = target_id {
+                    statuses.push((target_id, data));
+                }
+            }
+            let probability = cursor.get_f32_be()?;
+            for (id, data) in statuses {
+                effects.push((id, data, probability));
+            }
+        }
+        if !cursor.is_empty() {
+            return Err(ReadingError::Message(
+                "trailing bytes in consumable component".into(),
+            ));
+        }
+    }
+
+    let mut out = Vec::new();
+    out.write_var_int(&nutrition).r()?;
+    out.write_f32_be(saturation).r()?;
+    out.write_bool(can_always_eat).r()?;
+    if target >= V::V_1_21 {
+        out.write_f32_be(eat_seconds).r()?;
+        if let Some(remainder) = remainder {
+            let mut cursor = remainder;
+            let item = TEMPLATE_ITEM.read(&mut cursor)?;
+            if !cursor.is_empty() {
+                return Err(ReadingError::Message(
+                    "trailing bytes in food remainder".into(),
+                ));
+            }
+            let mapped = super::item::StructuredItemRewriter::to_version(&item, target, ids);
+            ItemT::for_version(target).write(&mut out, &mapped).r()?;
+        } else {
+            ItemT::for_version(target)
+                .write(&mut out, &crate::api::types::Item::Empty)
+                .r()?;
+        }
+    }
+    out.write_var_int(&VarInt(i32::try_from(effects.len()).map_err(|_| {
+        ReadingError::Message("food effect count overflow".into())
+    })?))
+    .r()?;
+    for (id, data, probability) in effects {
+        out.write_var_int(&VarInt(id)).r()?;
+        out.write_slice(&data).r()?;
+        out.write_f32_be(probability).r()?;
+    }
+    Ok(out)
+}
+
+fn copy_consume_effect_tail(
+    cursor: &mut &[u8],
+    out: &mut Vec<u8>,
+    effect_type: i32,
+    input_has_directional_particles: bool,
+    output_has_directional_particles: bool,
+) -> Result<(), ReadingError> {
+    match effect_type {
+        0 => {
+            copy_shape(&Shape::StatusEffects, cursor, out)?;
+            copy_shape(&Shape::F32, cursor, out)?;
+        }
+        1 => copy_shape(&Shape::IdSet, cursor, out)?,
+        2 => {}
+        3 => {
+            copy_shape(&Shape::F32, cursor, out)?;
+            if input_has_directional_particles {
+                let value = cursor.get_bool()?;
+                if output_has_directional_particles {
+                    out.write_bool(value).r()?;
                 }
             } else if output_has_directional_particles {
                 out.write_bool(true).r()?;

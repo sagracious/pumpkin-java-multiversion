@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crc_fast::{CrcAlgorithm::Crc32Iscsi, Digest};
 use pumpkin_data::data_component::DataComponent;
@@ -15,17 +15,16 @@ use crate::api::types::{HashedItem, Item, ItemComponent};
 use crate::api::{ComposedMappings, IdMapping, UserConnection};
 
 const BACKUP_KEY: &str = "PJM|26_3_backup";
-const CACHE_LIMIT: usize = 1024;
 
 #[derive(Default)]
 pub struct ItemBackupCache {
     entries: HashMap<(i32, i32), Option<ItemBackup>>,
-    order: VecDeque<(i32, i32)>,
 }
 
 #[derive(Clone, PartialEq)]
 struct ItemBackup {
     server_item_id: i32,
+    restore_item_id: bool,
     server_has_custom_data: bool,
     marker: NbtCompound,
     restore_added: Vec<ItemComponent>,
@@ -40,25 +39,12 @@ impl ItemBackupCache {
         if let Some(existing) = self.entries.get(&key) {
             if existing.as_ref() != Some(&backup) {
                 // A CRC32C collision must never select one item's backup for
-                // another. Tombstone the key until it leaves the bounded cache.
+                // another. Tombstone the key for this connection's lifetime.
                 self.entries.insert(key, None);
             }
-            self.order.retain(|existing| *existing != key);
-            self.order.push_back(key);
-            self.evict_overflow();
             return;
         }
         self.entries.insert(key, Some(backup));
-        self.order.push_back(key);
-        self.evict_overflow();
-    }
-
-    fn evict_overflow(&mut self) {
-        while self.order.len() > CACHE_LIMIT {
-            if let Some(expired) = self.order.pop_front() {
-                self.entries.remove(&expired);
-            }
-        }
     }
 
     fn get(&self, key: (i32, i32)) -> Option<&ItemBackup> {
@@ -68,7 +54,7 @@ impl ItemBackupCache {
 
 /// Adds a client-visible marker to the downgraded item's custom data and
 /// remembers fields that need server-side recovery. The marker is accepted
-/// only when a matching entry exists in this connection's bounded cache.
+/// only when a matching entry exists in this connection's cache.
 pub fn backup_clientbound_item(
     connection: &mut UserConnection,
     original: &Item,
@@ -87,6 +73,7 @@ pub fn backup_clientbound_item(
         && backup.restore_removed.is_empty()
         && backup.remove_server_added.is_empty()
         && backup.remove_server_removed.is_empty()
+        && !backup.restore_item_id
     {
         return;
     }
@@ -155,7 +142,12 @@ pub fn rewrite_hashed_item(
         })
         .collect();
 
-    if let Some(backup) = cached.filter(|backup| backup.server_item_id == item.id) {
+    if let Some(backup) =
+        cached.filter(|backup| backup.restore_item_id || backup.server_item_id == item.id)
+    {
+        if backup.restore_item_id {
+            item.id = backup.server_item_id;
+        }
         item.added
             .retain(|(id, _)| !backup.remove_server_added.contains(id));
         if !backup.server_has_custom_data {
@@ -208,7 +200,7 @@ pub fn restore_full_item(
     let Some(backup) = connection
         .get::<ItemBackupCache>()
         .and_then(|cache| cache.get((client_item_id, custom_hash)).cloned())
-        .filter(|backup| backup.server_item_id == *id)
+        .filter(|backup| backup.restore_item_id || backup.server_item_id == *id)
     else {
         return;
     };
@@ -217,6 +209,9 @@ pub fn restore_full_item(
         Some(NbtTag::Compound(marker)) if marker == &backup.marker
     ) {
         return;
+    }
+    if backup.restore_item_id {
+        *id = backup.server_item_id;
     }
 
     compound.child_tags.remove(BACKUP_KEY);
@@ -408,9 +403,19 @@ fn build_backup(
     remove_server_removed.sort_unstable();
     remove_server_removed.dedup();
 
-    let marker = marker_tag(&restore_added, &restore_removed);
+    let client_item_id = match downgraded {
+        Item::Structured { id, .. } | Item::Nbt { id, .. } => *id,
+        Item::Empty => return None,
+    };
+    let restore_item_id = map(ids.items_inverse(), client_item_id) != Some(*server_item_id);
+    let marker = marker_tag(
+        &restore_added,
+        &restore_removed,
+        restore_item_id.then_some(*server_item_id),
+    );
     Some(ItemBackup {
         server_item_id: *server_item_id,
+        restore_item_id,
         server_has_custom_data: source_added
             .iter()
             .any(|component| component.id == i32::from(DataComponent::CustomData.to_id())),
@@ -485,8 +490,15 @@ fn add_marker(
     }
 }
 
-fn marker_tag(added: &[ItemComponent], removed: &[i32]) -> NbtCompound {
+fn marker_tag(
+    added: &[ItemComponent],
+    removed: &[i32],
+    restored_item_id: Option<i32>,
+) -> NbtCompound {
     let mut marker = NbtCompound::new();
+    if let Some(item_id) = restored_item_id {
+        marker.put_int("item_id", item_id);
+    }
     let entries = added
         .iter()
         .map(|component| {
@@ -744,6 +756,35 @@ mod tests {
         right.put_int("second", 2);
         right.put_int("first", 1);
         assert_eq!(hash_compound(&left), hash_compound(&right));
+    }
+
+    #[test]
+    fn old_item_backups_remain_available_after_many_distinct_items() {
+        let mut cache = ItemBackupCache::default();
+        let make_backup = |server_item_id| ItemBackup {
+            server_item_id,
+            restore_item_id: false,
+            server_has_custom_data: false,
+            marker: NbtCompound::new(),
+            restore_added: Vec::new(),
+            restore_added_hashes: Vec::new(),
+            restore_removed: Vec::new(),
+            remove_server_added: Vec::new(),
+            remove_server_removed: Vec::new(),
+        };
+
+        for key in 0..2048 {
+            cache.insert((key, key.wrapping_add(1)), make_backup(key));
+        }
+
+        assert!(
+            cache.get((0, 1)).is_some(),
+            "the first marked stack still restores"
+        );
+        assert!(
+            cache.get((2047, 2048)).is_some(),
+            "the latest stack restores"
+        );
     }
 
     #[test]
@@ -1170,6 +1211,55 @@ mod tests {
         let restored = read_custom_data(&restored.data).unwrap();
         assert_eq!(restored.get_string("owner"), Some("server"));
         assert!(!restored.child_tags.contains_key(BACKUP_KEY));
+    }
+
+    #[test]
+    fn backported_item_id_restores_when_explicit_model_data_is_preserved() {
+        let version = V::V_1_20_3;
+        let ids = MappingData::get().composed(version);
+        let source_item_id = 72;
+        let native = Item::Structured {
+            count: 1,
+            id: source_item_id,
+            added: vec![native_component(DataComponent::CustomModelData, {
+                let mut data = var_int_bytes(1);
+                data.extend(42.0_f32.to_bits().to_be_bytes());
+                data.extend([0, 0, 0]);
+                data
+            })],
+            removed: Vec::new(),
+        };
+        let mut downgraded = StructuredItemRewriter::to_version(&native, version, ids);
+        let mut connection = UserConnection::new(29, version);
+        backup_clientbound_item(&mut connection, &native, &mut downgraded, version, ids);
+
+        let mut wire = Vec::new();
+        ItemT::for_version(version)
+            .write(&mut wire, &downgraded)
+            .unwrap();
+        let mut input = wire.as_slice();
+        let client_item = ItemT::for_version(version).read(&mut input).unwrap();
+        assert!(input.is_empty());
+        let mut returned = StructuredItemRewriter::to_native(&client_item, version, ids);
+        restore_full_item(&connection, &mut returned, version, ids);
+
+        assert_eq!(returned.item_id(), Some(source_item_id));
+        let Item::Structured { added, .. } = returned else {
+            panic!("the restored backported item remains structured");
+        };
+        let restored_model = added
+            .iter()
+            .find(|component| component.id == i32::from(DataComponent::CustomModelData.to_id()))
+            .expect("the explicit custom model data survives");
+        assert_eq!(
+            item_nbt::legacy_custom_model_data(&restored_model.data),
+            Some(42)
+        );
+        assert!(
+            !added
+                .iter()
+                .any(|component| component.id == i32::from(DataComponent::CustomData.to_id()))
+        );
     }
 
     #[test]

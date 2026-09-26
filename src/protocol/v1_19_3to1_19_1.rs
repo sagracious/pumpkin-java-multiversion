@@ -26,6 +26,8 @@ impl Protocol for Protocol1_19_3To1_19_1 {
     }
 
     fn register(&self, reg: &mut Registry) {
+        // Chat preview disappeared in 1.19.3 and has no modern replacement.
+        reg.cancel_serverbound(&serverbound::play::CHAT_PREVIEW);
         reg.serverbound_layout(&serverbound::play::CHAT, chat);
         reg.clientbound_layout(&clientbound::play::PLAYER_INFO_UPDATE, player_info_update);
         reg.clientbound_layout(&clientbound::play::PLAYER_INFO_REMOVE, player_info_remove);
@@ -575,5 +577,34 @@ mod player_tests {
             .is_none()
         );
         remove_connection(46);
+    }
+
+    #[test]
+    fn removed_chat_preview_is_explicitly_cancelled() {
+        let protocol = Protocol1_19_3To1_19_1;
+        let packet = &serverbound::play::CHAT_PREVIEW;
+        assert_eq!(packet.v26_3, -1);
+
+        let mut registry = Registry::default();
+        protocol.register(&mut registry);
+        let handler = registry
+            .serverbound_handler(packet)
+            .expect("removed packet must have a cancellation handler")
+            .handler;
+        for (key, version) in [
+            (47, JavaMinecraftVersion::V_1_19_1),
+            (48, JavaMinecraftVersion::V_1_19),
+        ] {
+            assert_ne!(packet.to_id(version), -1, "{version}");
+            let mut wrapper = PacketWrapper::new(packet, &[]);
+            let mut connection = UserConnection::new(key, version);
+            let context = Ctx {
+                step: protocol.step(),
+                mappings: MappingData::get().step(JavaMinecraftVersion::V_1_19_3),
+                layout: version,
+            };
+            handler(&mut wrapper, &mut connection, &context).unwrap();
+            assert!(wrapper.finish().unwrap().is_none(), "{version}");
+        }
     }
 }

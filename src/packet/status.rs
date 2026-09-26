@@ -1,4 +1,5 @@
-//! Rewrites the status response so older clients show the server as joinable.
+//! Rewrites the status response so supported clients show the server as joinable
+//! and the advertised range matches this plugin's login gate.
 //!
 //! A 26.3 server always reports protocol 777, so an older client would draw a
 //! red cross and "Incompatible version!" even though this plugin lets it connect.
@@ -6,7 +7,10 @@
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 use pumpkin_util::version::JavaMinecraftVersion;
 
-/// Rewrites `version.protocol`/`version.name` so the client sees itself as compatible.
+use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED};
+
+/// Rewrites `version.protocol`/`version.name` so the client sees itself as compatible
+/// and the status response advertises the full supported range.
 /// `None` means the payload wasn't the expected JSON string; caller leaves it alone.
 #[must_use]
 pub fn rewrite_status_response(payload: &[u8], version: JavaMinecraftVersion) -> Option<Vec<u8>> {
@@ -22,7 +26,7 @@ pub fn rewrite_status_response(payload: &[u8], version: JavaMinecraftVersion) ->
     );
     version_obj.insert(
         "name".to_string(),
-        serde_json::Value::from(version.to_string()),
+        serde_json::Value::from(format!("{LOWEST_SUPPORTED}-{HIGHEST_SUPPORTED}")),
     );
 
     let rewritten = serde_json::to_string(&value).ok()?;
@@ -37,7 +41,7 @@ mod tests {
     use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
     use pumpkin_util::version::JavaMinecraftVersion;
 
-    const TIER_4: &[JavaMinecraftVersion] = &[
+    const STATUS_TEST_VERSIONS: &[JavaMinecraftVersion] = &[
         JavaMinecraftVersion::V_1_16_2,
         JavaMinecraftVersion::V_1_16_3,
         JavaMinecraftVersion::V_1_16_4,
@@ -53,6 +57,8 @@ mod tests {
         JavaMinecraftVersion::V_1_20_2,
         JavaMinecraftVersion::V_1_20_3,
         JavaMinecraftVersion::V_1_20_5,
+        JavaMinecraftVersion::V_26_2,
+        JavaMinecraftVersion::V_26_3,
     ];
 
     fn payload(json: &str) -> Vec<u8> {
@@ -68,8 +74,8 @@ mod tests {
     );
 
     #[test]
-    fn every_tier_4_version_gets_its_own_protocol_back() {
-        for version in TIER_4 {
+    fn supported_versions_keep_their_protocol_and_advertise_the_range() {
+        for version in STATUS_TEST_VERSIONS {
             let out = rewrite_status_response(&payload(SERVER_RESPONSE), *version)
                 .unwrap_or_else(|| panic!("{version} produced no response"));
 
@@ -89,8 +95,8 @@ mod tests {
             );
             assert_eq!(
                 value["version"]["name"].as_str(),
-                Some(version.to_string().as_str()),
-                "{version}: version name was not rewritten"
+                Some("1.16.2-26.3"),
+                "{version}: advertised supported range was not rewritten"
             );
             assert_eq!(
                 value["description"]["text"].as_str(),

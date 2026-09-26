@@ -37,6 +37,9 @@ const MAX_INDIRECT_BIOME_BITS: u8 = 3;
 const BLOCKS_PER_SECTION: usize = 16 * 16 * 16;
 /// Biome entries in a section, from 1.18.
 const BIOMES_PER_SECTION: usize = 4 * 4 * 4;
+/// Bound untrusted heightmap metadata before iterating its variable-length arrays.
+const MAX_HEIGHTMAPS: usize = 256;
+const MAX_HEIGHTMAP_LONGS: usize = 4096;
 /// Bounds synthesized legacy block entities within Pumpkin's packet-size cap.
 const MAX_CHUNK_BLOCK_ENTITIES: usize = 131_072;
 
@@ -150,19 +153,29 @@ fn copy_container(
 /// from 1.21.5, a network NBT compound before that (with a root name before
 /// 1.20.2, which is where core's `write_nbt_with_version` drops it too, so
 /// 764 and 765 take the unnamed branch).
-fn copy_heightmaps(
+pub(crate) fn copy_heightmaps(
     cursor: &mut &[u8],
     out: &mut Vec<u8>,
     version: JavaMinecraftVersion,
 ) -> Option<()> {
     if version >= JavaMinecraftVersion::V_1_21_5 {
-        let map_count = cursor.get_var_int().ok()?.0;
-        out.write_var_int(&VarInt(map_count)).ok()?;
+        let map_count = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+        if map_count > MAX_HEIGHTMAPS {
+            return None;
+        }
+        out.write_var_int(&VarInt(i32::try_from(map_count).ok()?))
+            .ok()?;
         for _ in 0..map_count {
             let index = cursor.get_var_int().ok()?.0;
-            let len = cursor.get_var_int().ok()?.0;
+            if index < 0 {
+                return None;
+            }
+            let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+            if len > MAX_HEIGHTMAP_LONGS || len.checked_mul(8)? > cursor.len() {
+                return None;
+            }
             out.write_var_int(&VarInt(index)).ok()?;
-            out.write_var_int(&VarInt(len)).ok()?;
+            out.write_var_int(&VarInt(i32::try_from(len).ok()?)).ok()?;
             for _ in 0..len {
                 let val = cursor.get_i64_be().ok()?;
                 out.write_i64_be(val).ok()?;
@@ -727,6 +740,39 @@ mod tests {
             remap_chunk_payload(&payload, JavaMinecraftVersion::V_1_20).is_none(),
             "1.20 expects a root name and must reject these bytes"
         );
+    }
+
+    #[test]
+    fn heightmap_lists_reject_negative_and_truncated_lengths() {
+        let version = JavaMinecraftVersion::V_26_2;
+        for payload in [
+            {
+                let mut bytes = Vec::new();
+                bytes.write_var_int(&VarInt(-1)).unwrap();
+                bytes
+            },
+            {
+                let mut bytes = Vec::new();
+                bytes.write_var_int(&VarInt(1)).unwrap();
+                bytes.write_var_int(&VarInt(1)).unwrap();
+                bytes.write_var_int(&VarInt(-1)).unwrap();
+                bytes
+            },
+            {
+                let mut bytes = Vec::new();
+                bytes.write_var_int(&VarInt(1)).unwrap();
+                bytes.write_var_int(&VarInt(1)).unwrap();
+                bytes.write_var_int(&VarInt(1)).unwrap();
+                bytes
+            },
+        ] {
+            let mut cursor = payload.as_slice();
+            let mut rewritten = Vec::new();
+            assert!(
+                copy_heightmaps(&mut cursor, &mut rewritten, version).is_none(),
+                "invalid heightmap lengths must fail closed"
+            );
+        }
     }
 
     #[test]

@@ -74,10 +74,7 @@ fn rewrite_chunk_block_entities(payload: &[u8], version: V) -> Option<Vec<u8>> {
     out.write_i32_be(chunk_x).ok()?;
     out.write_i32_be(chunk_z).ok()?;
 
-    let heightmaps = NbtT::for_version(version).read(&mut cursor).ok()?;
-    NbtT::for_version(version)
-        .write(&mut out, &heightmaps)
-        .ok()?;
+    crate::packet::chunk_remap::copy_heightmaps(&mut cursor, &mut out, version)?;
     let section_len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
     if section_len > cursor.len() {
         return None;
@@ -118,7 +115,7 @@ fn chunk(
         return Ok(());
     }
     let translated = rewrite_chunk_block_entities(wrapper.remaining(), ctx.layout)
-        .ok_or(TranslateError::Unsupported("chunk block entity NBT"))?;
+        .ok_or(TranslateError::Unsupported("chunk payload layout"))?;
     wrapper.replace_remaining(translated);
     Ok(())
 }
@@ -235,9 +232,16 @@ mod tests {
         let mut payload = Vec::new();
         payload.write_i32_be(2).unwrap();
         payload.write_i32_be(-3).unwrap();
-        NbtT::for_version(version)
-            .write(&mut payload, &None)
-            .unwrap();
+        // Since 1.21.5, chunk heightmaps are a counted list of registry IDs
+        // and packed longs, not an NBT compound.
+        VAR_INT.write(&mut payload, &VarInt(3)).unwrap(); // Pumpkin's three heightmaps
+        for (index, seed) in [(1, 10_i64), (4, 20), (5, 30)] {
+            VAR_INT.write(&mut payload, &VarInt(index)).unwrap();
+            VAR_INT.write(&mut payload, &VarInt(37)).unwrap(); // packed long count
+            for offset in 0..37 {
+                payload.write_i64_be(seed + offset).unwrap();
+            }
+        }
         VAR_INT.write(&mut payload, &VarInt(0)).unwrap(); // empty section data
         VAR_INT.write(&mut payload, &VarInt(1)).unwrap(); // one block entity
         payload.push(0x21);
@@ -252,7 +256,14 @@ mod tests {
         let mut cursor = out.as_slice();
         assert_eq!(cursor.get_i32_be().unwrap(), 2);
         assert_eq!(cursor.get_i32_be().unwrap(), -3);
-        NbtT::for_version(version).read(&mut cursor).unwrap();
+        assert_eq!(cursor.get_var_int().unwrap().0, 3);
+        for (index, seed) in [(1, 10_i64), (4, 20), (5, 30)] {
+            assert_eq!(cursor.get_var_int().unwrap().0, index);
+            assert_eq!(cursor.get_var_int().unwrap().0, 37);
+            for offset in 0..37 {
+                assert_eq!(cursor.get_i64_be().unwrap(), seed + offset);
+            }
+        }
         assert_eq!(cursor.get_var_int().unwrap().0, 0);
         assert_eq!(cursor.get_var_int().unwrap().0, 1);
         assert_eq!(cursor.get_u8().unwrap(), 0x21);
