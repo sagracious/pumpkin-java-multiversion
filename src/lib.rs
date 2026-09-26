@@ -110,16 +110,17 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                 &event.raw_payload,
             ) {
                 Some(translated) => {
-                    event
-                        .serverbound_packets
-                        .extend(translated.serverbound.into_iter().filter_map(
-                            |(packet, raw_payload)| {
+                    event.serverbound_packets.extend(
+                        translated
+                            .serverbound
+                            .into_iter()
+                            .filter_map(|(packet, raw_payload)| {
                                 (packet.v26_3 >= 0).then_some(PacketTranslationOutput {
                                     packet_id: packet.v26_3,
                                     raw_payload,
                                 })
-                            },
-                        ));
+                            }),
+                    );
                     event
                         .clientbound_packets
                         .extend(translated.replies.into_iter().filter_map(
@@ -177,16 +178,17 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                         return event;
                     }
                     event.translated = true;
-                    event
-                        .serverbound_packets
-                        .extend(translated.serverbound.into_iter().filter_map(
-                            |(packet, raw_payload)| {
+                    event.serverbound_packets.extend(
+                        translated
+                            .serverbound
+                            .into_iter()
+                            .filter_map(|(packet, raw_payload)| {
                                 (packet.v26_3 >= 0).then_some(PacketTranslationOutput {
                                     packet_id: packet.v26_3,
                                     raw_payload,
                                 })
-                            },
-                        ));
+                            }),
+                    );
                     event
                         .clientbound_packets
                         .extend(translated.extra.into_iter().filter_map(

@@ -28,7 +28,10 @@ impl Protocol for Protocol26_2To26_1 {
             &clientbound::play::SECTION_BLOCKS_UPDATE,
             section_blocks_update_bed_entities,
         );
-        reg.clientbound(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk_bed_entities);
+        reg.clientbound(
+            &clientbound::play::LEVEL_CHUNK_WITH_LIGHT,
+            chunk_bed_entities,
+        );
         reg.clientbound(&clientbound::play::SET_ENTITY_DATA, sulfur_cube_metadata);
         reg.serverbound(&serverbound::play::SPECTATE_ENTITY, spectate_entity);
     }
@@ -249,7 +252,9 @@ fn bed_block_entity_payload(position: i64, version: V) -> Option<Vec<u8>> {
     let mut payload = Vec::new();
     payload.write_i64_be(position).ok()?;
     if version >= V::V_1_18 {
-        VAR_INT.write(&mut payload, &VarInt(bed_block_entity_type_id(version)?)).ok()?;
+        VAR_INT
+            .write(&mut payload, &VarInt(bed_block_entity_type_id(version)?))
+            .ok()?;
     } else {
         // Before 1.18 the packet uses the block-entity action byte, where 11 is bed.
         U8.write(&mut payload, &11).ok()?;
@@ -508,7 +513,10 @@ mod tests {
         payload.write_i32_be(-4).unwrap();
         VAR_INT.write(&mut payload, &VarInt(0)).unwrap(); // empty heightmap list
         VAR_INT
-            .write(&mut payload, &VarInt(i32::try_from(sections.len()).unwrap()))
+            .write(
+                &mut payload,
+                &VarInt(i32::try_from(sections.len()).unwrap()),
+            )
             .unwrap();
         payload.extend_from_slice(&sections);
         VAR_INT.write(&mut payload, &VarInt(0)).unwrap(); // no block entities

@@ -727,10 +727,7 @@ mod tests {
         decorations.put("camp", NbtTag::Compound(decoration));
         let mut map_payload = Vec::new();
         map_payload
-            .write_nbt_with_version(
-                Some(&NbtTag::Compound(decorations)),
-                &V::V_26_3,
-            )
+            .write_nbt_with_version(Some(&NbtTag::Compound(decorations)), &V::V_26_3)
             .unwrap();
 
         let native_component = ItemComponent {
@@ -767,7 +764,8 @@ mod tests {
             .find(|component| component.id == map_decorations_id)
             .expect("downgraded map decorations");
         let mut map_reader = downgraded_map.data.as_slice();
-        let Some(NbtTag::Compound(downgraded_decorations)) = map_reader.get_nbt(&V::V_26_3).unwrap()
+        let Some(NbtTag::Compound(downgraded_decorations)) =
+            map_reader.get_nbt(&V::V_26_3).unwrap()
         else {
             panic!("downgraded map decorations remain a compound");
         };
@@ -809,7 +807,9 @@ mod tests {
             .write(&mut client_bytes, &downgraded)
             .unwrap();
         let mut client_reader = client_bytes.as_slice();
-        let client_item = ItemT::for_version(version).read(&mut client_reader).unwrap();
+        let client_item = ItemT::for_version(version)
+            .read(&mut client_reader)
+            .unwrap();
         assert!(client_reader.is_empty());
         let mut full_item = StructuredItemRewriter::to_native(&client_item, version, ids);
         restore_full_item(&connection, &mut full_item, version, ids);

@@ -50,7 +50,7 @@ jobs:
       - name: Check changed Rust formatting
         working-directory: pumpkin-java-multiversion
         run: >-
-          rustfmt --edition 2024 --check
+          rustfmt --edition 2024 --check --config skip_children=true
           src/api/connection.rs
           src/api/rewriter/item_backup.rs
           src/api/rewriter/item_component.rs
@@ -86,6 +86,7 @@ jobs:
           src/protocol/v1_15_2to1_15_1.rs
           src/protocol/v1_15to1_14_4.rs
           src/protocol/v1_16_1to1_16.rs
+          src/protocol/v1_16_2to1_16_1.rs
           src/protocol/v1_16_4to1_16_3.rs
           src/protocol/v1_16to1_15_2.rs
           src/protocol/v26_1to1_21_11.rs

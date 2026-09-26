@@ -118,9 +118,7 @@ pub fn translate_clientbound(
             .finish_with_outputs()
             .map_err(|error| dropped(packet, version, "finish", &error))
             .ok()?;
-        if translated.cancelled
-            && translated.extra.is_empty()
-            && translated.serverbound.is_empty()
+        if translated.cancelled && translated.extra.is_empty() && translated.serverbound.is_empty()
         {
             return None;
         }
@@ -218,9 +216,7 @@ mod tests {
             steps_for(JavaMinecraftVersion::V_1_16_2),
             STEPS
                 .iter()
-                .position(|protocol| {
-                    protocol.step().to == JavaMinecraftVersion::V_1_16_2
-                })
+                .position(|protocol| { protocol.step().to == JavaMinecraftVersion::V_1_16_2 })
                 .unwrap()
                 + 1
         );

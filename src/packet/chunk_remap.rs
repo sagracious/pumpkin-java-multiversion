@@ -127,10 +127,9 @@ fn copy_container(
                 if entry_index >= entry_count {
                     break;
                 }
-                let state = u16::try_from(
-                    (packed as u64 >> (slot * usize::from(bits_per_entry))) & mask,
-                )
-                .ok()?;
+                let state =
+                    u16::try_from((packed as u64 >> (slot * usize::from(bits_per_entry))) & mask)
+                        .ok()?;
                 let mapped = u64::from(remap_block_state_for_version(state, version));
                 if mapped > mask {
                     return None;
@@ -374,9 +373,17 @@ pub fn append_chunk_block_entities(
         let y = entries_cursor.get_i16_be().ok()?;
         let entity_type = entries_cursor.get_var_int().ok()?;
         let raw_nbt = nbt.read(&mut entries_cursor).ok()?;
-        let x = chunk_x.checked_mul(16)?.checked_add(i32::from(packed_xz >> 4))?;
-        let z = chunk_z.checked_mul(16)?.checked_add(i32::from(packed_xz & 0x0f))?;
-        positions.insert(pack_block_position(i64::from(x), i64::from(y), i64::from(z)));
+        let x = chunk_x
+            .checked_mul(16)?
+            .checked_add(i32::from(packed_xz >> 4))?;
+        let z = chunk_z
+            .checked_mul(16)?
+            .checked_add(i32::from(packed_xz & 0x0f))?;
+        positions.insert(pack_block_position(
+            i64::from(x),
+            i64::from(y),
+            i64::from(z),
+        ));
         entries.write_u8(packed_xz).ok()?;
         entries.write_i16_be(y).ok()?;
         entries.write_var_int(&entity_type).ok()?;
@@ -385,10 +392,7 @@ pub fn append_chunk_block_entities(
 
     let mut empty_nbt = Vec::new();
     NbtT::for_version(version)
-        .write(
-            &mut empty_nbt,
-            &Some(NbtTag::Compound(NbtCompound::new())),
-        )
+        .write(&mut empty_nbt, &Some(NbtTag::Compound(NbtCompound::new())))
         .ok()?;
     let mut added = 0usize;
     for &(position, entity_type) in additions {
@@ -399,7 +403,9 @@ pub fn append_chunk_block_entities(
         if x.div_euclid(16) != chunk_x || z.div_euclid(16) != chunk_z {
             return None;
         }
-        entries.write_u8((((x & 0x0f) << 4) | (z & 0x0f)) as u8).ok()?;
+        entries
+            .write_u8((((x & 0x0f) << 4) | (z & 0x0f)) as u8)
+            .ok()?;
         entries.write_i16_be(i16::try_from(y).ok()?).ok()?;
         entries.write_var_int(&VarInt(entity_type)).ok()?;
         nbt.write(&mut entries, &empty_nbt).ok()?;
@@ -464,8 +470,8 @@ fn matching_indices_in_block_palette(
     let mut found = Vec::new();
     for index in 0..BLOCKS_PER_SECTION {
         let word = *words.get(index / per_long)?;
-        let palette_index = ((word >> ((index % per_long) * usize::from(bits_per_entry))) & mask)
-            as usize;
+        let palette_index =
+            ((word >> ((index % per_long) * usize::from(bits_per_entry))) & mask) as usize;
         let state = if indirect {
             *palette.get(palette_index)?
         } else {
@@ -479,16 +485,18 @@ fn matching_indices_in_block_palette(
 }
 
 fn pack_block_position(x: i64, y: i64, z: i64) -> i64 {
-    (((x as u64) & 0x03ff_ffff) << 38
-        | ((z as u64) & 0x03ff_ffff) << 12
-        | ((y as u64) & 0x0fff)) as i64
+    (((x as u64) & 0x03ff_ffff) << 38 | ((z as u64) & 0x03ff_ffff) << 12 | ((y as u64) & 0x0fff))
+        as i64
 }
 
 fn unpack_block_position(position: i64) -> (i32, i32, i32) {
     let bits = position as u64;
-    let x = (((bits >> 38) & 0x03ff_ffff) as i32 << 6) >> 6;
-    let z = (((bits >> 12) & 0x03ff_ffff) as i32 << 6) >> 6;
-    let y = ((bits & 0x0fff) as i32 << 20) >> 20;
+    let raw_x = ((bits >> 38) & 0x03ff_ffff) as i32;
+    let raw_z = ((bits >> 12) & 0x03ff_ffff) as i32;
+    let raw_y = (bits & 0x0fff) as i32;
+    let x = (raw_x << 6) >> 6;
+    let z = (raw_z << 6) >> 6;
+    let y = (raw_y << 20) >> 20;
     (x, y, z)
 }
 

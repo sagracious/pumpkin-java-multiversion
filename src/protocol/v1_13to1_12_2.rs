@@ -495,7 +495,10 @@ fn login_custom_query(
 ) -> Result<(), TranslateError> {
     let id = wrapper.read(&VAR_INT)?;
     let channel = wrapper.read(&STRING)?;
-    if matches!(channel.as_ref(), VELOCITY_FORWARDING_CHANNEL | VINE_FORWARDING_CHANNEL) {
+    if matches!(
+        channel.as_ref(),
+        VELOCITY_FORWARDING_CHANNEL | VINE_FORWARDING_CHANNEL
+    ) {
         // These login queries authenticate the proxy connection, not a 1.13
         // client feature. Let Velocity/Vine answer them unchanged.
         wrapper.write(&VAR_INT, &id)?;

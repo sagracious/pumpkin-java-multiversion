@@ -334,7 +334,10 @@ mod tests {
         assert_eq!(meta_data_type_id_for_name("item_stack", V_1_13), Some(6));
         assert_eq!(meta_data_type_id_for_name("item_stack", V_1_14), Some(6));
         assert_eq!(meta_data_type_id_for_name("villager_data", V_1_13_2), None);
-        assert_eq!(meta_data_type_id_for_name("villager_data", V_1_14), Some(16));
+        assert_eq!(
+            meta_data_type_id_for_name("villager_data", V_1_14),
+            Some(16)
+        );
         assert_eq!(
             canonical_meta_data_type_id_for_version(13, V_1_14),
             Some(15),

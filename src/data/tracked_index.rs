@@ -359,8 +359,14 @@ mod tests {
 
     #[test]
     fn older_than_the_audited_index_floor_fails_closed() {
-        assert_eq!(tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_15_2), None);
-        assert_eq!(tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_16_2), Some(18));
+        assert_eq!(
+            tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_15_2),
+            None
+        );
+        assert_eq!(
+            tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_16_2),
+            Some(18)
+        );
     }
 
     #[test]

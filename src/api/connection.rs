@@ -267,12 +267,21 @@ mod tests {
         }
 
         prune_unbound(&mut connections, now);
-        assert!(!connections.contains_key(&1), "expired login state is removed");
-        assert!(connections.contains_key(&2), "live player state is retained");
+        assert!(
+            !connections.contains_key(&1),
+            "expired login state is removed"
+        );
+        assert!(
+            connections.contains_key(&2),
+            "live player state is retained"
+        );
         assert!(!connections.contains_key(&(9 + MAX_UNBOUND_CONNECTIONS as u64)));
         assert!(!connections.contains_key(&(10 + MAX_UNBOUND_CONNECTIONS as u64)));
         assert_eq!(
-            connections.values().filter(|connection| !connection.bound).count(),
+            connections
+                .values()
+                .filter(|connection| !connection.bound)
+                .count(),
             MAX_UNBOUND_CONNECTIONS - 1
         );
     }

@@ -316,10 +316,7 @@ fn legacy_dimension_name(dimension_id: i32) -> &'static str {
     }
 }
 
-fn validate_pre_1_16_login(
-    payload: &[u8],
-    version: JavaMinecraftVersion,
-) -> Option<()> {
+fn validate_pre_1_16_login(payload: &[u8], version: JavaMinecraftVersion) -> Option<()> {
     let mut read: &[u8] = payload;
     read.get_i32_be().ok()?; // Entity id.
     read.get_u8().ok()?; // Hardcore flag plus game mode.
@@ -348,10 +345,7 @@ fn validate_pre_1_16_login(
     read.is_empty().then_some(())
 }
 
-fn validate_pre_1_16_respawn(
-    payload: &[u8],
-    version: JavaMinecraftVersion,
-) -> Option<()> {
+fn validate_pre_1_16_respawn(payload: &[u8], version: JavaMinecraftVersion) -> Option<()> {
     let mut read: &[u8] = payload;
     read.get_i32_be().ok()?; // Dimension id.
     if version >= JavaMinecraftVersion::V_1_15 {
@@ -629,12 +623,12 @@ mod tests {
 
     #[test]
     fn native_1_16_login_is_validated_and_preserved() {
-        for version in [
-            JavaMinecraftVersion::V_1_16,
-            JavaMinecraftVersion::V_1_16_1,
-        ] {
+        for version in [JavaMinecraftVersion::V_1_16, JavaMinecraftVersion::V_1_16_1] {
             let payload = legacy_login();
-            assert_eq!(rewrite_login(&payload, version).as_deref(), Some(payload.as_slice()));
+            assert_eq!(
+                rewrite_login(&payload, version).as_deref(),
+                Some(payload.as_slice())
+            );
             assert_eq!(
                 login_world_bounds(&payload, version),
                 world_bounds("minecraft:overworld")
@@ -648,10 +642,7 @@ mod tests {
 
     #[test]
     fn native_1_16_respawn_is_validated_and_preserved() {
-        for version in [
-            JavaMinecraftVersion::V_1_16,
-            JavaMinecraftVersion::V_1_16_1,
-        ] {
+        for version in [JavaMinecraftVersion::V_1_16, JavaMinecraftVersion::V_1_16_1] {
             let payload = legacy_respawn();
             assert_eq!(
                 rewrite_respawn(&payload, version).as_deref(),
@@ -675,7 +666,10 @@ mod tests {
             JavaMinecraftVersion::V_1_15_2,
         ] {
             let payload = pre_1_16_login(version);
-            assert_eq!(rewrite_login(&payload, version).as_deref(), Some(payload.as_slice()));
+            assert_eq!(
+                rewrite_login(&payload, version).as_deref(),
+                Some(payload.as_slice())
+            );
             assert_eq!(
                 login_world_bounds(&payload, version),
                 world_bounds("minecraft:the_nether")
