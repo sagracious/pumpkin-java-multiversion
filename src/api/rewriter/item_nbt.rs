@@ -276,14 +276,33 @@ fn sanitize_base(
     }
 }
 
-fn legacy_enchantment_list(pairs: &[(i32, i32)], version: V) -> Vec<NbtTag> {
+fn legacy_enchantment_list(
+    pairs: &[(i32, i32)],
+    version: V,
+    unsupported_lore: &mut Vec<NbtTag>,
+) -> Vec<NbtTag> {
     let mut tags = Vec::with_capacity(pairs.len());
     for (id, level) in pairs {
-        let Some(name) = u8::try_from(*id)
-            .ok()
-            .and_then(Enchantment::from_id)
-            .and_then(|enchantment| legacy_enchantment_name(enchantment, version))
-        else {
+        let Some(enchantment) = u8::try_from(*id).ok().and_then(Enchantment::from_id) else {
+            continue;
+        };
+        let Some(name) = legacy_enchantment_name(enchantment, version) else {
+            if version < V::V_1_20_5
+                && let Some(static_id) = u32::try_from(*id).ok().and_then(|id| {
+                    MappingData::get()
+                        .composed(V::V_1_20_5)
+                        .enchantments
+                        .map(id)
+                })
+                && let Some(mapped_name) = MappingData::get()
+                    .step(V::V_1_20_5)
+                    .enchantment_names
+                    .get(&static_id)
+            {
+                unsupported_lore.push(NbtTag::String(
+                    enchantment_lore_line(mapped_name, *level, version).into(),
+                ));
+            }
             continue;
         };
         let mut entry = NbtCompound::new();
@@ -292,6 +311,104 @@ fn legacy_enchantment_list(pairs: &[(i32, i32)], version: V) -> Vec<NbtTag> {
         tags.push(NbtTag::Compound(entry));
     }
     tags
+}
+
+pub(crate) fn unsupported_enchantment_lore(
+    bytes: &[u8],
+    target: V,
+    ids: &ComposedMappings,
+) -> Vec<String> {
+    if target < V::V_1_20_5 {
+        return Vec::new();
+    }
+    var_int_pairs(bytes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, level)| {
+            let source_id = u32::try_from(id).ok()?;
+            if ids.enchantments.map(source_id).is_some() {
+                return None;
+            }
+            let enchantment = u8::try_from(id).ok().and_then(Enchantment::from_id)?;
+            let key = enchantment
+                .registry_key
+                .strip_prefix("minecraft:")
+                .unwrap_or(enchantment.registry_key);
+            let name = key
+                .split('_')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    chars.next().map_or_else(String::new, |first| {
+                        first.to_uppercase().collect::<String>() + chars.as_str()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(enchantment_lore_line(&name, level, target))
+        })
+        .collect()
+}
+
+pub(crate) fn append_enchantment_lore(
+    existing: Option<&[u8]>,
+    lines: &[String],
+) -> Option<Vec<u8>> {
+    if lines.is_empty() {
+        return existing.map(ToOwned::to_owned);
+    }
+    let mut existing_lines = Vec::new();
+    if let Some(existing) = existing {
+        let mut cursor = existing;
+        let count = cursor.get_var_int().ok()?.0;
+        if !(0..=4096).contains(&count) {
+            return None;
+        }
+        for _ in 0..count {
+            existing_lines.push(cursor.get_nbt(&V::V_26_2).ok()??);
+        }
+        if !cursor.is_empty() {
+            return None;
+        }
+    }
+
+    let count = lines.len().checked_add(existing_lines.len())?;
+    let mut output = Vec::new();
+    output
+        .write_var_int(&VarInt(i32::try_from(count).ok()?))
+        .ok()?;
+    for line in lines {
+        output
+            .write_nbt_with_version(Some(&NbtTag::String(line.clone().into())), &V::V_26_2)
+            .ok()?;
+    }
+    for line in existing_lines {
+        output
+            .write_nbt_with_version(Some(&line), &V::V_26_2)
+            .ok()?;
+    }
+    Some(output)
+}
+
+fn enchantment_lore_line(name: &str, level: i32, version: V) -> String {
+    let level = match level {
+        1 => "I".to_owned(),
+        2 => "II".to_owned(),
+        3 => "III".to_owned(),
+        4 => "IV".to_owned(),
+        5 => "V".to_owned(),
+        6 => "VI".to_owned(),
+        7 => "VII".to_owned(),
+        8 => "VIII".to_owned(),
+        9 => "IX".to_owned(),
+        10 => "X".to_owned(),
+        other => other.to_string(),
+    };
+    let text = format!("{name} {level}");
+    if version >= V::V_1_14 {
+        serde_json::json!({"text": text, "color": "gray"}).to_string()
+    } else {
+        text
+    }
 }
 
 fn native_enchantment_list(tags: &[NbtTag]) -> Vec<(i32, i32)> {
@@ -603,6 +720,7 @@ pub fn components_to_nbt(
     // Unknown display children belong to custom_data too. Keep them as a base
     // and let the actual item components replace only their legacy keys.
     let mut display = root.get_compound("display").cloned().unwrap_or_default();
+    let mut unsupported_enchantment_lore = Vec::new();
 
     for entry in added {
         let Some(component) = u8::try_from(entry.id)
@@ -651,14 +769,14 @@ pub fn components_to_nbt(
                 let Some(pairs) = var_int_pairs(&entry.data) else {
                     continue;
                 };
-                let list = legacy_enchantment_list(&pairs, version);
-                if list.is_empty() {
-                    continue;
-                }
-                if component == DataComponent::Enchantments {
-                    root.put_list("Enchantments", list);
-                } else {
-                    root.put_list("StoredEnchantments", list);
+                let list =
+                    legacy_enchantment_list(&pairs, version, &mut unsupported_enchantment_lore);
+                if !list.is_empty() {
+                    if component == DataComponent::Enchantments {
+                        root.put_list("Enchantments", list);
+                    } else {
+                        root.put_list("StoredEnchantments", list);
+                    }
                 }
             }
             DataComponent::CustomModelData => {
@@ -775,6 +893,11 @@ pub fn components_to_nbt(
         }
     }
 
+    if !unsupported_enchantment_lore.is_empty() {
+        let mut lore = unsupported_enchantment_lore;
+        lore.extend(display.get_list("Lore").cloned().unwrap_or_default());
+        display.put_list("Lore", lore);
+    }
     if !display.is_empty() {
         root.put_compound("display", display);
     }
@@ -1202,6 +1325,25 @@ mod tests {
             var_int_pairs(enchantments).unwrap(),
             vec![(i32::from(sharpness.id), 4)]
         );
+    }
+
+    #[test]
+    fn enchantments_missing_from_1_20_3_use_vias_display_name_lore() {
+        let density = Enchantment::from_name("density").unwrap();
+        let mut data = var_int(1);
+        data.extend(var_int(i32::from(density.id)));
+        data.extend(var_int(3));
+        let added = vec![component(DataComponent::Enchantments, data)];
+        let version = V::V_1_20_3;
+
+        let nbt = components_to_nbt(&added, version, MappingData::get().composed(version))
+            .expect("the unsupported enchantment still has display lore");
+        assert!(nbt.get_list("Enchantments").is_none());
+        let lore = nbt
+            .get_compound("display")
+            .and_then(|display| display.get_list("Lore"))
+            .expect("fallback enchantment lore");
+        assert!(lore[0].extract_string().unwrap().contains("Density III"));
     }
 
     #[test]

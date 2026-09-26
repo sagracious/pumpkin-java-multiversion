@@ -9,6 +9,7 @@ use pumpkin_nbt::deserializer::NbtReadHelperJava;
 use pumpkin_nbt::nbt_compress::read_gzip_compound_tag;
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_util::version::JavaMinecraftVersion::{self, *};
+use std::collections::HashMap;
 
 struct StepFile {
     from: JavaMinecraftVersion,
@@ -239,6 +240,12 @@ pub struct StepMappings {
     pub blocks: IdMapping,
     pub items: IdMapping,
     pub sounds: IdMapping,
+    /// Identifier aliases stored beside numeric sound ids in Via mapping files.
+    pub sound_names: HashMap<String, String>,
+    /// Legacy display labels keyed by the source enchantment id.
+    pub enchantment_names: HashMap<u32, String>,
+    /// Custom-model-data fallback values keyed by source item id.
+    pub custom_model_data: HashMap<u32, i32>,
     pub blockentities: IdMapping,
     pub entities: IdMapping,
     pub particles: IdMapping,
@@ -261,6 +268,9 @@ impl StepMappings {
             blocks: IdMapping::IDENTITY,
             items: IdMapping::IDENTITY,
             sounds: IdMapping::IDENTITY,
+            sound_names: HashMap::new(),
+            enchantment_names: HashMap::new(),
+            custom_model_data: HashMap::new(),
             blockentities: IdMapping::IDENTITY,
             entities: IdMapping::IDENTITY,
             particles: IdMapping::IDENTITY,
@@ -288,6 +298,9 @@ impl StepMappings {
             blocks: space("blocks"),
             items: space("items"),
             sounds: space("sounds"),
+            sound_names: load_name_mappings(&root, "soundnames"),
+            enchantment_names: load_id_name_mappings(&root, "enchantmentnames"),
+            custom_model_data: load_id_int_mappings(&root, "custom_model_data"),
             blockentities: space("blockentities"),
             entities: space("entities"),
             particles: space("particles"),
@@ -323,6 +336,8 @@ pub struct ComposedMappings {
     pub attributes: IdMapping,
     pub enchantments: IdMapping,
     pub paintings: IdMapping,
+    /// ViaBackwards fallback model ids keyed by 26.3 item id.
+    pub custom_model_data: HashMap<u32, i32>,
     items_inverse: OnceLock<IdMapping>,
     data_component_type_inverse: OnceLock<IdMapping>,
     blockstates_inverse: OnceLock<IdMapping>,
@@ -349,6 +364,7 @@ impl ComposedMappings {
             attributes: IdMapping::IDENTITY,
             enchantments: IdMapping::IDENTITY,
             paintings: IdMapping::IDENTITY,
+            custom_model_data: HashMap::new(),
             items_inverse: OnceLock::new(),
             data_component_type_inverse: OnceLock::new(),
             blockstates_inverse: OnceLock::new(),
@@ -375,6 +391,7 @@ impl ComposedMappings {
             attributes: self.attributes.compose(&step.attributes),
             enchantments: self.enchantments.compose(&step.enchantments),
             paintings: self.paintings.compose(&step.paintings),
+            custom_model_data: self.custom_model_data.clone(),
             items_inverse: OnceLock::new(),
             data_component_type_inverse: OnceLock::new(),
             blockstates_inverse: OnceLock::new(),
@@ -457,15 +474,16 @@ impl MappingData {
             for step in &STEPS[..length] {
                 composed = composed.compose(self.step(step.from));
             }
-            if let Some(enchantments) = enchantment_mapping(target) {
+            if let Some(enchantments) = enchantment_mapping(self, target) {
                 composed.enchantments = enchantments;
             }
+            composed.custom_model_data = self.custom_model_data_for_length(length);
             composed
         })
     }
 
-    /// Composes only the vendored Via step tables. `composed` applies the
-    /// generated-registry enchantment correction after this baseline chain.
+    /// Composes only the vendored Via step tables, before registry-name
+    /// enchantment correction and per-item model fallbacks are applied.
     fn compose_steps(&self, target: JavaMinecraftVersion) -> ComposedMappings {
         let length = STEPS
             .iter()
@@ -477,12 +495,68 @@ impl MappingData {
         }
         composed
     }
+
+    fn compose_enchantment_steps_from_1_20_5(
+        &self,
+        target: JavaMinecraftVersion,
+    ) -> Option<IdMapping> {
+        let first = STEPS.iter().position(|step| step.from == V_1_20_5)?;
+        let end = STEPS
+            .iter()
+            .filter(|step| step.to.protocol_version() >= target.protocol_version())
+            .count();
+        if end < first {
+            return None;
+        }
+        let mut mapping = IdMapping::IDENTITY;
+        for step in &STEPS[first..end] {
+            mapping = mapping.compose(&self.step(step.from).enchantments);
+        }
+        Some(mapping)
+    }
+
+    fn custom_model_data_for_length(&self, length: usize) -> HashMap<u32, i32> {
+        let mut custom_model_data = HashMap::new();
+        if length == 0 {
+            return custom_model_data;
+        }
+        for source_id in source_item_ids() {
+            let source_id = u32::from(*source_id);
+            let mut current_id = source_id;
+            let mut model = None;
+            let mut representable = true;
+            for step in &STEPS[..length] {
+                let mappings = self.step(step.from);
+                if model.is_none() {
+                    model = mappings.custom_model_data.get(&current_id).copied();
+                }
+                let Some(mapped_id) = mappings.items.map(current_id) else {
+                    representable = false;
+                    break;
+                };
+                current_id = mapped_id;
+            }
+            if representable && let Some(model) = model {
+                custom_model_data.insert(source_id, model);
+            }
+        }
+        custom_model_data
+    }
+}
+
+fn source_item_ids() -> &'static [u16] {
+    static IDS: OnceLock<Vec<u16>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..=u16::MAX)
+            .filter(|id| pumpkin_data::item::Item::from_id(*id).is_some())
+            .collect()
+    })
 }
 
 /// Builds the server-to-client enchantment id table from generated registries
-/// for versions where enchantments are synced registries. Older clients use
-/// static enchantment ids; their mappings remain the Via step-table result.
-fn enchantment_mapping(target: JavaMinecraftVersion) -> Option<IdMapping> {
+/// where enchantments are synced. Static clients use Via's 1.20.5 id order,
+/// then the same step tables ViaBackwards applies to older versions.
+fn enchantment_mapping(data: &MappingData, target: JavaMinecraftVersion) -> Option<IdMapping> {
     if target == V_26_3 {
         return Some(IdMapping::IDENTITY);
     }
@@ -490,23 +564,69 @@ fn enchantment_mapping(target: JavaMinecraftVersion) -> Option<IdMapping> {
     let source = pumpkin_data::registry::REGISTRY_V_26_3
         .iter()
         .find(|registry| registry.registry_id == "enchantment")?;
-    let target = crate::registry::generated::get_synced(target)?
-        .iter()
-        .find(|registry| registry.registry_id == "enchantment")?;
 
-    let table = source
-        .entries
-        .iter()
-        .map(|source_entry| {
-            target
-                .entries
-                .iter()
-                .position(|entry| entry.name == source_entry.name)
-                .and_then(|id| i32::try_from(id).ok())
-                .unwrap_or(-1)
-        })
-        .collect();
-    Some(IdMapping(Repr::Table(table)))
+    if target >= V_1_21 {
+        let target = crate::registry::generated::get_synced(target)?
+            .iter()
+            .find(|registry| registry.registry_id == "enchantment")?;
+        let table = source
+            .entries
+            .iter()
+            .map(|source_entry| {
+                target
+                    .entries
+                    .iter()
+                    .position(|entry| entry.name == source_entry.name)
+                    .and_then(|id| i32::try_from(id).ok())
+                    .unwrap_or(-1)
+            })
+            .collect();
+        return Some(IdMapping(Repr::Table(table)));
+    }
+
+    // Via keeps the static 1.20.5 enchantment order in this asset; targets
+    // below 1.20.5 then follow the same step mappings used by ViaBackwards.
+    let static_names = via_1_20_5_enchantment_names();
+    let mut mapping = IdMapping(Repr::Table(
+        source
+            .entries
+            .iter()
+            .map(|source_entry| {
+                static_names
+                    .iter()
+                    .position(|name| name.as_str() == source_entry.name)
+                    .and_then(|id| i32::try_from(id).ok())
+                    .unwrap_or(-1)
+            })
+            .collect(),
+    ));
+
+    Some(mapping.compose(&data.compose_enchantment_steps_from_1_20_5(target)?))
+}
+
+fn via_1_20_5_enchantment_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let root = read_root(include_bytes!(
+            "../../assets/viaversion/data/enchantments-1.21.nbt"
+        ));
+        root.get_list("entries")
+            .expect("ViaVersion 1.20.5 enchantment entries")
+            .iter()
+            .map(|tag| {
+                let NbtTag::Compound(entry) = tag else {
+                    panic!("ViaVersion enchantment entry is a compound");
+                };
+                let name = entry
+                    .get_compound("description")
+                    .and_then(|description| description.get_string("translate"))
+                    .expect("ViaVersion enchantment description key");
+                name.strip_prefix("enchantment.minecraft.")
+                    .expect("ViaVersion enchantment translation")
+                    .to_owned()
+            })
+            .collect()
+    })
 }
 
 /// The vendored files are plain named NBT; Via ships them gzipped.
@@ -526,6 +646,54 @@ fn load_space(root: &NbtCompound, key: &str, from: JavaMinecraftVersion) -> IdMa
         return IdMapping(Repr::Table(over.table.to_vec()));
     }
     root.get_compound(key).map_or(IdMapping::IDENTITY, decode)
+}
+
+fn load_name_mappings(root: &NbtCompound, key: &str) -> HashMap<String, String> {
+    let Some(names) = root.get_compound(key) else {
+        return HashMap::new();
+    };
+    names
+        .child_tags
+        .iter()
+        .filter_map(|(from, value)| match value {
+            NbtTag::String(to) => Some((from.to_string(), to.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn load_id_name_mappings(root: &NbtCompound, key: &str) -> HashMap<u32, String> {
+    let Some(names) = root.get_compound(key) else {
+        return HashMap::new();
+    };
+    names
+        .child_tags
+        .iter()
+        .filter_map(|(from, value)| {
+            let id = from.parse().ok()?;
+            let NbtTag::String(name) = value else {
+                return None;
+            };
+            Some((id, name.to_string()))
+        })
+        .collect()
+}
+
+fn load_id_int_mappings(root: &NbtCompound, key: &str) -> HashMap<u32, i32> {
+    let Some(mappings) = root.get_compound(key) else {
+        return HashMap::new();
+    };
+    mappings
+        .child_tags
+        .iter()
+        .filter_map(|(source, value)| {
+            let id = source.parse().ok()?;
+            let NbtTag::Int(value) = value else {
+                return None;
+            };
+            Some((id, *value))
+        })
+        .collect()
 }
 
 /// Decodes one id space with the strategy it was written with.
@@ -804,7 +972,7 @@ mod tests {
     ];
 
     #[test]
-    fn every_composed_table_matches_the_snapshot() {
+    fn every_via_step_composition_matches_the_snapshot() {
         for (version, snapshot) in SNAPSHOT {
             let hash = hash_version(&MappingData::get().compose_steps(*version));
             assert_eq!(hash, *snapshot, "{version:?}");
@@ -847,6 +1015,7 @@ mod tests {
 
         for version in [
             JavaMinecraftVersion::V_1_21,
+            JavaMinecraftVersion::V_1_21_9,
             JavaMinecraftVersion::V_1_21_11,
             JavaMinecraftVersion::V_26_2,
         ] {
@@ -860,46 +1029,69 @@ mod tests {
             }
         }
 
-        // Before 1.21 the client has a static enchantment registry and Via's
-        // step tables are the authoritative id mapping, including identity
-        // fallbacks where Via supplies no row.
-        let older = JavaMinecraftVersion::V_1_20_5;
-        let raw = MappingData::get().compose_steps(older);
-        let composed = MappingData::get().composed(older);
-        for id in 0..source.len() as u32 {
-            assert_eq!(
-                composed.enchantments.map(id),
-                raw.enchantments.map(id),
-                "static enchantment id {id} at {older:?}"
-            );
+        // Static clients use Via's 1.20.5 id order followed by its downgrade
+        // tables. IDs added after that order have no representable target row.
+        let static_names = super::via_1_20_5_enchantment_names();
+        let raw_1_20_3 = MappingData::get()
+            .compose_enchantment_steps_from_1_20_5(JavaMinecraftVersion::V_1_20_3)
+            .unwrap();
+        for version in [
+            JavaMinecraftVersion::V_1_20_5,
+            JavaMinecraftVersion::V_1_20_3,
+            JavaMinecraftVersion::V_1_16_2,
+        ] {
+            let map = &MappingData::get().composed(version).enchantments;
+            let via_steps = if version == JavaMinecraftVersion::V_1_20_5 {
+                Some(IdMapping::IDENTITY)
+            } else {
+                MappingData::get().compose_enchantment_steps_from_1_20_5(version)
+            };
+            for name in ["breach", "density", "wind_burst", "lunge"] {
+                let expected = static_names
+                    .iter()
+                    .position(|static_name| static_name.as_str() == name)
+                    .and_then(|id| u32::try_from(id).ok())
+                    .and_then(|id| via_steps.as_ref().and_then(|mapping| mapping.map(id)));
+                assert_eq!(map.map(source_id(name)), expected, "{name} at {version:?}");
+            }
         }
+
+        assert_eq!(raw_1_20_3.map(37), None, "Density is dropped for 1.20.3");
+        let step = MappingData::get().step(JavaMinecraftVersion::V_1_20_5);
+        assert_eq!(
+            step.enchantment_names.get(&37).map(String::as_str),
+            Some("Density")
+        );
+        assert_eq!(
+            step.enchantment_names.get(&38).map(String::as_str),
+            Some("Breach")
+        );
+        assert_eq!(
+            step.enchantment_names.get(&39).map(String::as_str),
+            Some("Wind Burst")
+        );
+    }
+
+    #[test]
+    fn via_custom_model_data_fallbacks_follow_item_ids_across_steps() {
+        let step = MappingData::get().step(JavaMinecraftVersion::V_26_3);
+        assert_eq!(step.custom_model_data.get(&72), Some(&865));
+        assert_eq!(
+            MappingData::get()
+                .composed(JavaMinecraftVersion::V_26_2)
+                .custom_model_data
+                .get(&72),
+            Some(&865)
+        );
     }
 
     #[test]
     fn via_1_21_enchantment_asset_matches_the_generated_registry_names() {
-        use pumpkin_nbt::tag::NbtTag;
         use std::collections::BTreeSet;
 
-        let via = super::read_root(include_bytes!(
-            "../../assets/viaversion/data/enchantments-1.21.nbt"
-        ));
-        let via_names = via
-            .get_list("entries")
-            .expect("ViaVersion enchantment entries")
+        let via_names = super::via_1_20_5_enchantment_names()
             .iter()
-            .map(|tag| {
-                let NbtTag::Compound(entry) = tag else {
-                    panic!("ViaVersion enchantment entry is a compound");
-                };
-                let translation = entry
-                    .get_compound("description")
-                    .and_then(|description| description.get_string("translate"))
-                    .expect("ViaVersion enchantment description key");
-                translation
-                    .strip_prefix("enchantment.minecraft.")
-                    .expect("namespaced ViaVersion enchantment translation")
-                    .to_owned()
-            })
+            .cloned()
             .collect::<BTreeSet<_>>();
         let generated_names = crate::registry::generated::get_synced(JavaMinecraftVersion::V_1_21)
             .expect("1.21 generated registry")

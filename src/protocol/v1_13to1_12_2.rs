@@ -252,7 +252,7 @@ fn legacy_text(component: TextComponent, version: JavaMinecraftVersion, limit: u
 fn stop_sound(
     wrapper: &mut PacketWrapper,
     _connection: &mut UserConnection,
-    _ctx: &Ctx,
+    ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     const SOURCES: [&str; 10] = [
         "master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient",
@@ -273,7 +273,21 @@ fn stop_sound(
         ""
     };
     let sound = if flags & 2 != 0 {
-        wrapper.read(&STRING)?
+        let source = wrapper.read(&STRING)?;
+        let Some((namespace, bare)) = source.split_once(':') else {
+            return Err(TranslateError::Unsupported("stop-sound identifier"));
+        };
+        if namespace == "minecraft"
+            && let Some(mapped) = ctx.mappings.sound_names.get(bare)
+        {
+            if mapped.is_empty() {
+                wrapper.cancel();
+                return Ok(());
+            }
+            format!("{namespace}:{mapped}").into_boxed_str()
+        } else {
+            source
+        }
     } else {
         "".into()
     };
@@ -821,6 +835,31 @@ mod tests {
         assert_eq!(
             &*STRING.read(&mut read).unwrap(),
             "minecraft:music_disc.cat"
+        );
+        assert!(read.is_empty());
+    }
+
+    #[test]
+    fn stop_sound_applies_vias_identifier_aliases() {
+        let mut input = vec![2];
+        STRING
+            .write(&mut input, &"minecraft:block.beacon.activate".into())
+            .unwrap();
+        let mut wrapper = PacketWrapper::new(&clientbound::play::STOP_SOUND, &input);
+        stop_sound(
+            &mut wrapper,
+            &mut UserConnection::new(0, V1_12_2),
+            &context(V1_13),
+        )
+        .unwrap();
+
+        let result = wrapper.finish().unwrap().unwrap();
+        let mut read = result.payload.as_slice();
+        assert_eq!(&*STRING.read(&mut read).unwrap(), "MC|StopSound");
+        assert_eq!(&*STRING.read(&mut read).unwrap(), ""); // No category selector.
+        assert_eq!(
+            &*STRING.read(&mut read).unwrap(),
+            "minecraft:entity.elder_guardian.curse"
         );
         assert!(read.is_empty());
     }

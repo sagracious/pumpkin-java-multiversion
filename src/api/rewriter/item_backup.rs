@@ -83,7 +83,11 @@ pub fn backup_clientbound_item(
     let Some(backup) = build_backup(original, downgraded, target, ids) else {
         return;
     };
-    if backup.restore_added.is_empty() && backup.restore_removed.is_empty() {
+    if backup.restore_added.is_empty()
+        && backup.restore_removed.is_empty()
+        && backup.remove_server_added.is_empty()
+        && backup.remove_server_removed.is_empty()
+    {
         return;
     }
 
@@ -365,6 +369,29 @@ fn build_backup(
         }
         if let Some(group) = added_groups.get(&target_id) {
             remove_server_added.extend(group.iter().map(|component| component.id));
+        }
+    }
+    let custom_model_data_id = i32::from(DataComponent::CustomModelData.to_id());
+    if !source_added
+        .iter()
+        .any(|component| component.id == custom_model_data_id)
+        && u32::try_from(*server_item_id)
+            .ok()
+            .is_some_and(|id| ids.custom_model_data.contains_key(&id))
+    {
+        let client_model_id = if legacy_nbt {
+            Some(custom_model_data_id)
+        } else {
+            map_component_id(
+                custom_model_data_id,
+                DataComponent::CustomModelData,
+                target,
+                ids,
+            )
+        };
+        if client_model_id.is_some_and(|id| client_added.iter().any(|component| component.id == id))
+        {
+            remove_server_added.push(custom_model_data_id);
         }
     }
     let mut remove_server_removed = Vec::new();
@@ -883,6 +910,40 @@ mod tests {
             );
             assert!(!restored_custom_data.child_tags.contains_key(BACKUP_KEY));
         }
+    }
+
+    #[test]
+    fn via_custom_model_fallback_restores_the_original_new_item_and_removes_the_marker() {
+        let target = V::V_26_2;
+        let ids = MappingData::get().composed(target);
+        let native = Item::Structured {
+            count: 1,
+            id: 72,
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        let mut downgraded = StructuredItemRewriter::to_version(&native, target, ids);
+        let mut connection = UserConnection::new(0x2623_00f1, target);
+        backup_clientbound_item(&mut connection, &native, &mut downgraded, target, ids);
+
+        let mut returned = StructuredItemRewriter::to_native(&downgraded, target, ids);
+        restore_full_item(&connection, &mut returned, target, ids);
+        let Item::Structured { id, added, .. } = returned else {
+            panic!("the matched fallback resolves to its source item");
+        };
+        assert_eq!(id, 72);
+        assert!(
+            !added
+                .iter()
+                .any(|component| component.id == i32::from(DataComponent::CustomModelData.to_id())),
+            "synthetic display metadata is removed before the stack returns to Pumpkin"
+        );
+        assert!(
+            !added
+                .iter()
+                .any(|component| component.id == i32::from(DataComponent::CustomData.to_id())),
+            "the temporary backup marker is removed"
+        );
     }
 
     #[test]

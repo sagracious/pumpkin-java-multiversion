@@ -26,12 +26,22 @@ impl StructuredItemRewriter {
         else {
             return item.clone();
         };
-        let Some(id) = map(&ids.items, *id) else {
+        let source_item_id = *id;
+        let Some(id) = map(&ids.items, source_item_id) else {
             return Item::Empty;
         };
+        let fallback_model = u32::try_from(source_item_id)
+            .ok()
+            .and_then(|source_id| ids.custom_model_data.get(&source_id).copied());
 
         if target < ItemT::FIRST_STRUCTURED {
-            let nbt = item_nbt::components_to_nbt(added, target, ids);
+            let nbt = if let Some(value) = fallback_model {
+                let mut nbt = item_nbt::components_to_nbt(added, target, ids).unwrap_or_default();
+                nbt.put_int("CustomModelData", value);
+                Some(nbt)
+            } else {
+                item_nbt::components_to_nbt(added, target, ids)
+            };
             return Item::Nbt {
                 id,
                 count: i8::try_from(*count).unwrap_or(i8::MAX),
@@ -40,6 +50,7 @@ impl StructuredItemRewriter {
         }
 
         let mut out: Vec<ItemComponent> = Vec::with_capacity(added.len());
+        let mut unsupported_enchantment_lore = Vec::new();
         for component in added {
             let Some(native) = u8::try_from(component.id)
                 .ok()
@@ -47,6 +58,16 @@ impl StructuredItemRewriter {
             else {
                 continue;
             };
+            if matches!(
+                native,
+                DataComponent::Enchantments | DataComponent::StoredEnchantments
+            ) {
+                unsupported_enchantment_lore.extend(item_nbt::unsupported_enchantment_lore(
+                    &component.data,
+                    target,
+                    ids,
+                ));
+            }
             let Some(mapped) = map_component_id(component.id, native, target, ids) else {
                 continue;
             };
@@ -61,6 +82,35 @@ impl StructuredItemRewriter {
                 existing.data = data;
             } else {
                 out.push(ItemComponent { id: mapped, data });
+            }
+        }
+        if !unsupported_enchantment_lore.is_empty()
+            && let Some(lore_id) = map_component_id(
+                i32::from(DataComponent::Lore.to_id()),
+                DataComponent::Lore,
+                target,
+                ids,
+            )
+        {
+            let existing = out.iter().position(|component| component.id == lore_id);
+            let current = existing.map(|index| out[index].data.as_slice());
+            if let Some(data) =
+                item_nbt::append_enchantment_lore(current, &unsupported_enchantment_lore)
+            {
+                if let Some(index) = existing {
+                    out[index].data = data;
+                } else {
+                    out.push(ItemComponent { id: lore_id, data });
+                }
+            }
+        }
+        if let Some(value) = fallback_model
+            && let Some(fallback) = via_custom_model_data_component(value, target, ids)
+        {
+            if let Some(existing) = out.iter_mut().find(|existing| existing.id == fallback.id) {
+                existing.data = fallback.data;
+            } else {
+                out.push(fallback);
             }
         }
         let mut mapped_removed = Vec::with_capacity(removed.len());
@@ -93,7 +143,7 @@ impl StructuredItemRewriter {
         match item {
             Item::Empty => Item::Empty,
             Item::Nbt { id, count, nbt } => {
-                let Some(id) = map(ids.items_inverse(), *id) else {
+                let Some(mapped_id) = map(ids.items_inverse(), *id) else {
                     return Item::Empty;
                 };
                 let added = match nbt {
@@ -102,6 +152,7 @@ impl StructuredItemRewriter {
                     }
                     _ => Vec::new(),
                 };
+                let id = restore_backported_item_id(mapped_id, &added, ids).unwrap_or(mapped_id);
                 Item::Structured {
                     count: i32::from(*count),
                     id,
@@ -115,26 +166,24 @@ impl StructuredItemRewriter {
                 added,
                 removed,
             } => {
-                let Some(id) = map(ids.items_inverse(), *id) else {
+                let Some(mapped_id) = map(ids.items_inverse(), *id) else {
                     return Item::Empty;
                 };
                 let component_ids = ids.data_component_type_inverse();
+                let added: Vec<_> = added
+                    .iter()
+                    .filter_map(|component| {
+                        Some(ItemComponent {
+                            id: map_component_id_from_client(component.id, source, component_ids)?,
+                            data: component.data.clone(),
+                        })
+                    })
+                    .collect();
+                let id = restore_backported_item_id(mapped_id, &added, ids).unwrap_or(mapped_id);
                 Item::Structured {
                     count: *count,
                     id,
-                    added: added
-                        .iter()
-                        .filter_map(|component| {
-                            Some(ItemComponent {
-                                id: map_component_id_from_client(
-                                    component.id,
-                                    source,
-                                    component_ids,
-                                )?,
-                                data: component.data.clone(),
-                            })
-                        })
-                        .collect(),
+                    added,
                     removed: removed
                         .iter()
                         .filter_map(|id| map_component_id_from_client(*id, source, component_ids))
@@ -143,6 +192,43 @@ impl StructuredItemRewriter {
             }
         }
     }
+}
+
+fn restore_backported_item_id(
+    mapped_item_id: i32,
+    components: &[ItemComponent],
+    ids: &ComposedMappings,
+) -> Option<i32> {
+    let model = components
+        .iter()
+        .find(|component| component.id == i32::from(DataComponent::CustomModelData.to_id()))
+        .and_then(|component| item_nbt::legacy_custom_model_data(&component.data))?;
+    let mapped_item_id = u32::try_from(mapped_item_id).ok()?;
+    ids.custom_model_data.iter().find_map(|(source_id, value)| {
+        (*value == model && ids.items.map(*source_id) == Some(mapped_item_id))
+            .then(|| i32::try_from(*source_id).ok())
+            .flatten()
+    })
+}
+
+fn via_custom_model_data_component(
+    value: i32,
+    target: V,
+    ids: &ComposedMappings,
+) -> Option<ItemComponent> {
+    let component = DataComponent::CustomModelData;
+    let component_id = map_component_id(i32::from(component.to_id()), component, target, ids)?;
+    let mut native = Vec::new();
+    native.write_var_int(&VarInt(1)).ok()?;
+    native.write_f32_be(value as f32).ok()?;
+    for _ in 0..3 {
+        native.write_var_int(&VarInt(0)).ok()?;
+    }
+    let data = item_component::to_version(component, &native, target, ids)?;
+    Some(ItemComponent {
+        id: component_id,
+        data,
+    })
 }
 
 /// Reads one stack a client on `version` sent and returns it in the 26.3
@@ -734,7 +820,7 @@ pub(crate) fn map_component_id_from_client(id: i32, source: V, inverse: &IdMappi
 mod tests {
     use super::*;
     use crate::api::MappingData;
-    use crate::api::types::{BOOL, I8, VAR_INT};
+    use crate::api::types::{BOOL, I8, NbtT, VAR_INT};
 
     fn ids(target: V) -> &'static ComposedMappings {
         MappingData::get().composed(target)
@@ -770,6 +856,101 @@ mod tests {
         };
         assert_eq!(added.len(), 2);
         assert_eq!(added[1].data, Vec::<u8>::new(), "unbreakable is empty");
+    }
+
+    #[test]
+    fn via_new_item_fallbacks_add_the_custom_model_data_marker() {
+        let target = V::V_26_2;
+        let ids = ids(target);
+        let native = Item::Structured {
+            count: 1,
+            id: 72,
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+
+        let downgraded = StructuredItemRewriter::to_version(&native, target, ids);
+        let Item::Structured { added, .. } = &downgraded else {
+            panic!("the Via item fallback remains a structured stack");
+        };
+        let component_id = map_component_id(
+            i32::from(DataComponent::CustomModelData.to_id()),
+            DataComponent::CustomModelData,
+            target,
+            ids,
+        )
+        .expect("the target has a custom model data component");
+        let model = added
+            .iter()
+            .find(|component| component.id == component_id)
+            .expect("Via custom model data fallback");
+        assert_eq!(item_nbt::legacy_custom_model_data(&model.data), Some(865));
+
+        let restored = StructuredItemRewriter::to_native(&downgraded, target, ids);
+        assert_eq!(restored.item_id(), Some(72));
+
+        let old_target = V::V_1_20_3;
+        let old_ids = ids(old_target);
+        let legacy = StructuredItemRewriter::to_version(&native, old_target, old_ids);
+        let Item::Nbt {
+            nbt: Some(pumpkin_nbt::tag::NbtTag::Compound(nbt)),
+            ..
+        } = &legacy
+        else {
+            panic!("the older client receives the fallback item with NBT");
+        };
+        assert_eq!(nbt.get_int("CustomModelData"), Some(865));
+        assert_eq!(
+            StructuredItemRewriter::to_native(&legacy, old_target, old_ids).item_id(),
+            Some(72)
+        );
+    }
+
+    #[test]
+    fn enchantments_unknown_to_1_20_5_keep_vias_display_lore() {
+        let target = V::V_1_20_5;
+        let ids = ids(target);
+        let lunge = pumpkin_data::enchantment::Enchantment::from_name("lunge").unwrap();
+        let mut data = Vec::new();
+        VAR_INT.write(&mut data, &VarInt(1)).unwrap();
+        VAR_INT
+            .write(&mut data, &VarInt(i32::from(lunge.id)))
+            .unwrap();
+        VAR_INT.write(&mut data, &VarInt(1)).unwrap();
+        let native = Item::Structured {
+            count: 1,
+            id: i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id),
+            added: vec![ItemComponent {
+                id: i32::from(DataComponent::Enchantments.to_id()),
+                data,
+            }],
+            removed: Vec::new(),
+        };
+
+        let downgraded = StructuredItemRewriter::to_version(&native, target, ids);
+        let Item::Structured { added, .. } = downgraded else {
+            panic!("the target receives a structured item");
+        };
+        let lore_id = map_component_id(
+            i32::from(DataComponent::Lore.to_id()),
+            DataComponent::Lore,
+            target,
+            ids,
+        )
+        .unwrap();
+        let lore = added
+            .iter()
+            .find(|component| component.id == lore_id)
+            .expect("Via fallback enchantment lore");
+        let mut cursor = lore.data.as_slice();
+        assert_eq!(VAR_INT.read(&mut cursor).unwrap().0, 1);
+        let Some(pumpkin_nbt::tag::NbtTag::String(line)) =
+            NbtT::for_version(target).read(&mut cursor).unwrap()
+        else {
+            panic!("fallback lore line is a text tag");
+        };
+        assert!(line.contains("Lunge I"));
+        assert!(cursor.is_empty());
     }
 
     /// `md('1.21.4')` ends `enchantments` with a tooltip flag and types

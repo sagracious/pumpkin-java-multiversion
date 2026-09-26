@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn recipe_display_packet_is_kept_only_where_the_client_has_that_format() {
+    fn recipe_display_packets_are_kept_or_bridged_for_the_client_format() {
         for version in [JavaMinecraftVersion::V_26_2, JavaMinecraftVersion::V_1_21_2] {
             assert!(
                 translate_clientbound(
@@ -412,16 +412,16 @@ mod tests {
                 "{version}"
             );
         }
-        assert!(
-            translate_clientbound(
-                0,
-                JavaMinecraftVersion::V_1_16_2,
-                PLAY,
-                clientbound::play::RECIPE_BOOK_ADD.v26_3,
-                &[0, 0], // empty recipe entries, replace=false
-            )
-            .is_none()
-        );
+        let legacy = translate_clientbound(
+            0,
+            JavaMinecraftVersion::V_1_16_2,
+            PLAY,
+            clientbound::play::RECIPE_BOOK_ADD.v26_3,
+            &[0, 0], // empty recipe entries, replace=false
+        )
+        .expect("the pre-1.21.2 recipe bridge emits legacy packets");
+        assert!(legacy.cancelled);
+        assert_eq!(legacy.extra.len(), 2, "UPDATE_RECIPES then UNLOCK_RECIPES");
     }
 
     #[test]
