@@ -58,6 +58,43 @@ jobs:
           src/api/wrapper.rs
           src/lib.rs
           src/pipeline/mod.rs
+          src/api/entity_data.rs
+          src/api/rewriter/command.rs
+          src/api/rewriter/entity.rs
+          src/api/rewriter/particle.rs
+          src/api/rewriter/screen.rs
+          src/data/entity_data_types.rs
+          src/data/entity_types.rs
+          src/data/mappings.rs
+          src/data/tracked_index.rs
+          src/packet/join.rs
+          src/packet/recipe_book.rs
+          src/packet/chunk_remap.rs
+          src/protocol/mod.rs
+          src/protocol/v1_12_1to1_12.rs
+          src/protocol/v1_12_2to1_12_1.rs
+          src/protocol/v1_12to1_11_1.rs
+          src/protocol/v1_13_1to1_13.rs
+          src/protocol/v1_13_2to1_13_1.rs
+          src/protocol/v1_13to1_12_2.rs
+          src/protocol/v1_14_1to1_14.rs
+          src/protocol/v1_14_2to1_14_1.rs
+          src/protocol/v1_14_3to1_14_2.rs
+          src/protocol/v1_14_4to1_14_3.rs
+          src/protocol/v1_14to1_13_2.rs
+          src/protocol/v1_15_1to1_15.rs
+          src/protocol/v1_15_2to1_15_1.rs
+          src/protocol/v1_15to1_14_4.rs
+          src/protocol/v1_16_1to1_16.rs
+          src/protocol/v1_16_4to1_16_3.rs
+          src/protocol/v1_16to1_15_2.rs
+          src/protocol/v26_1to1_21_11.rs
+          src/protocol/v26_2to26_1.rs
+          src/protocol/v26_3to26_2.rs
+          src/protocol/v26_3to26_2/block.rs
+          src/protocol/v26_3to26_2/chat.rs
+          src/protocol/v26_3to26_2/entity.rs
+          src/protocol/v26_3to26_2/registry.rs
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pumpkin-java-multiversion -> target

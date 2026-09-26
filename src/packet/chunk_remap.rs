@@ -11,8 +11,10 @@
 //! Layout branches here are 1.20.2 (NBT root name), 1.21.5 (heightmap list,
 //! no length prefixes) and 26.1 (fluid count).
 
+use std::collections::HashSet;
 use std::io::Cursor;
 
+use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_nbt::deserializer::NbtReadHelperJava;
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_protocol::codec::var_int::VarInt;
@@ -20,6 +22,7 @@ use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::rewriter::block::rewrite_chunk_block_entities;
+use crate::api::types::{NbtT, WireType};
 use crate::remap::block_state_remap::remap_block_state_for_version;
 
 /// Oldest layout this parser understands, which is the one core writes.
@@ -34,6 +37,8 @@ const MAX_INDIRECT_BIOME_BITS: u8 = 3;
 const BLOCKS_PER_SECTION: usize = 16 * 16 * 16;
 /// Biome entries in a section, from 1.18.
 const BIOMES_PER_SECTION: usize = 4 * 4 * 4;
+/// Bounds synthesized legacy block entities within Pumpkin's packet-size cap.
+const MAX_CHUNK_BLOCK_ENTITIES: usize = 131_072;
 
 /// Number of packed longs for `entry_count` entries at `bits_per_entry`.
 const fn packed_long_count(entry_count: usize, bits_per_entry: u8) -> usize {
@@ -46,7 +51,8 @@ const fn packed_long_count(entry_count: usize, bits_per_entry: u8) -> usize {
 
 /// Copies one palette container, remapping block state ids when `remap` is set.
 /// Before 1.21.5 the packed data array carries a `VarInt` length; from 1.21.5 it's implied.
-/// Returns `None` for a direct palette, which is left alone rather than repacked at a different bit width.
+/// Direct palettes are rewritten in place at the sender's width; a mapped
+/// state that cannot fit that width makes the packet fail closed.
 fn copy_container(
     cursor: &mut &[u8],
     out: &mut Vec<u8>,
@@ -57,6 +63,9 @@ fn copy_container(
 ) -> Option<()> {
     let length_prefixed = version < JavaMinecraftVersion::V_1_21_5;
     let bits_per_entry = cursor.get_u8().ok()?;
+    if bits_per_entry > 32 {
+        return None;
+    }
     out.write_u8(bits_per_entry).ok()?;
 
     if bits_per_entry == 0 {
@@ -83,21 +92,55 @@ fn copy_container(
             };
             out.write_var_int(&VarInt(id)).ok()?;
         }
-    } else if remap.is_some() {
-        // Direct palette: ids live in the packed data at a width derived from
-        // the sender's registry size, so they cannot simply be copied across.
-        return None;
     }
 
+    let expected_longs = packed_long_count(entry_count, bits_per_entry);
     let longs = if length_prefixed {
         let len = cursor.get_var_int().ok()?.0;
         out.write_var_int(&VarInt(len)).ok()?;
-        usize::try_from(len).ok()?
+        let len = usize::try_from(len).ok()?;
+        if len != expected_longs {
+            return None;
+        }
+        len
     } else {
-        packed_long_count(entry_count, bits_per_entry)
+        expected_longs
     };
-    for _ in 0..longs {
+    let direct_remap = remap.is_some() && bits_per_entry > max_indirect_bits;
+    let per_long = if bits_per_entry == 0 {
+        0
+    } else {
+        64 / usize::from(bits_per_entry)
+    };
+    let mask = if bits_per_entry == 0 {
+        0
+    } else {
+        (1u64 << bits_per_entry) - 1
+    };
+    for long_index in 0..longs {
         let packed = cursor.get_i64_be().ok()?;
+        let packed = if direct_remap {
+            let version = remap?;
+            let mut rewritten = 0u64;
+            for slot in 0..per_long {
+                let entry_index = long_index * per_long + slot;
+                if entry_index >= entry_count {
+                    break;
+                }
+                let state = u16::try_from(
+                    (packed as u64 >> (slot * usize::from(bits_per_entry))) & mask,
+                )
+                .ok()?;
+                let mapped = u64::from(remap_block_state_for_version(state, version));
+                if mapped > mask {
+                    return None;
+                }
+                rewritten |= mapped << (slot * usize::from(bits_per_entry));
+            }
+            rewritten as i64
+        } else {
+            packed
+        };
         out.write_i64_be(packed).ok()?;
     }
 
@@ -220,6 +263,235 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
     Some(out)
 }
 
+/// Finds block coordinates in a target-layout chunk whose remapped state IDs
+/// satisfy `matches`. The chunk's section data has already passed through
+/// [`remap_chunk_payload`], so palette IDs are in `version`'s registry.
+#[must_use]
+pub fn matching_block_positions(
+    payload: &[u8],
+    version: JavaMinecraftVersion,
+    min_y: i32,
+    mut matches: impl FnMut(i32) -> bool,
+) -> Option<Vec<i64>> {
+    if version < OLDEST_LAYOUT {
+        return None;
+    }
+
+    let mut cursor = payload;
+    let chunk_x = cursor.get_i32_be().ok()?;
+    let chunk_z = cursor.get_i32_be().ok()?;
+    let mut ignored = Vec::new();
+    copy_heightmaps(&mut cursor, &mut ignored, version)?;
+    let data_len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+    if data_len > cursor.len() {
+        return None;
+    }
+    let (mut sections, _) = cursor.split_at(data_len);
+    let mut positions = Vec::new();
+    let mut section_index = 0i64;
+
+    while !sections.is_empty() {
+        // 1.21.5+ core data may include zero padding after the final section.
+        if sections.iter().all(|&byte| byte == 0) {
+            break;
+        }
+        sections.get_i16_be().ok()?; // non-air block count
+        if version >= JavaMinecraftVersion::V_26_1 {
+            sections.get_i16_be().ok()?; // fluid count
+        }
+
+        let found = matching_indices_in_block_palette(&mut sections, version, &mut matches)?;
+        let mut ignored_biomes = Vec::new();
+        copy_container(
+            &mut sections,
+            &mut ignored_biomes,
+            BIOMES_PER_SECTION,
+            MAX_INDIRECT_BIOME_BITS,
+            None,
+            version,
+        )?;
+
+        let section_y = i64::from(min_y) + (section_index << 4);
+        for index in found {
+            if positions.len() >= MAX_CHUNK_BLOCK_ENTITIES {
+                return None;
+            }
+            let local_x = (index & 0x0f) as i64;
+            let local_z = ((index >> 4) & 0x0f) as i64;
+            let local_y = ((index >> 8) & 0x0f) as i64;
+            positions.push(pack_block_position(
+                i64::from(chunk_x) * 16 + local_x,
+                section_y + local_y,
+                i64::from(chunk_z) * 16 + local_z,
+            ));
+        }
+        section_index += 1;
+    }
+
+    Some(positions)
+}
+
+/// Adds legacy block-entity entries to a target-layout chunk packet, keeping
+/// the light data and existing entity payloads intact. `additions` contains
+/// packed block positions and block-entity type IDs for `version`.
+#[must_use]
+pub fn append_chunk_block_entities(
+    payload: &[u8],
+    version: JavaMinecraftVersion,
+    additions: &[(i64, i32)],
+) -> Option<Vec<u8>> {
+    if version < OLDEST_LAYOUT || additions.len() > MAX_CHUNK_BLOCK_ENTITIES {
+        return None;
+    }
+    let mut cursor = payload;
+    let chunk_x = cursor.get_i32_be().ok()?;
+    let chunk_z = cursor.get_i32_be().ok()?;
+    let mut out = Vec::with_capacity(payload.len().saturating_add(additions.len() * 8));
+    out.write_i32_be(chunk_x).ok()?;
+    out.write_i32_be(chunk_z).ok()?;
+    copy_heightmaps(&mut cursor, &mut out, version)?;
+    let section_len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+    if section_len > cursor.len() {
+        return None;
+    }
+    let (sections, rest) = cursor.split_at(section_len);
+    out.write_var_int(&VarInt(i32::try_from(section_len).ok()?))
+        .ok()?;
+    out.extend_from_slice(sections);
+    cursor = rest;
+    let old_count = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+    if old_count > MAX_CHUNK_BLOCK_ENTITIES
+        || old_count.saturating_add(additions.len()) > MAX_CHUNK_BLOCK_ENTITIES
+    {
+        return None;
+    }
+    let mut entries_cursor = cursor;
+    let mut entries = Vec::new();
+    let mut positions = HashSet::with_capacity(old_count.saturating_add(additions.len()));
+    let nbt = crate::api::rewriter::block::RawNbtT::for_version(version);
+    for _ in 0..old_count {
+        let packed_xz = entries_cursor.get_u8().ok()?;
+        let y = entries_cursor.get_i16_be().ok()?;
+        let entity_type = entries_cursor.get_var_int().ok()?;
+        let raw_nbt = nbt.read(&mut entries_cursor).ok()?;
+        let x = chunk_x.checked_mul(16)?.checked_add(i32::from(packed_xz >> 4))?;
+        let z = chunk_z.checked_mul(16)?.checked_add(i32::from(packed_xz & 0x0f))?;
+        positions.insert(pack_block_position(i64::from(x), i64::from(y), i64::from(z)));
+        entries.write_u8(packed_xz).ok()?;
+        entries.write_i16_be(y).ok()?;
+        entries.write_var_int(&entity_type).ok()?;
+        nbt.write(&mut entries, &raw_nbt).ok()?;
+    }
+
+    let mut empty_nbt = Vec::new();
+    NbtT::for_version(version)
+        .write(
+            &mut empty_nbt,
+            &Some(NbtTag::Compound(NbtCompound::new())),
+        )
+        .ok()?;
+    let mut added = 0usize;
+    for &(position, entity_type) in additions {
+        if positions.contains(&position) {
+            continue;
+        }
+        let (x, y, z) = unpack_block_position(position);
+        if x.div_euclid(16) != chunk_x || z.div_euclid(16) != chunk_z {
+            return None;
+        }
+        entries.write_u8((((x & 0x0f) << 4) | (z & 0x0f)) as u8).ok()?;
+        entries.write_i16_be(i16::try_from(y).ok()?).ok()?;
+        entries.write_var_int(&VarInt(entity_type)).ok()?;
+        nbt.write(&mut entries, &empty_nbt).ok()?;
+        positions.insert(position);
+        added += 1;
+    }
+
+    out.write_var_int(&VarInt(i32::try_from(old_count + added).ok()?))
+        .ok()?;
+    out.extend_from_slice(&entries);
+    out.extend_from_slice(entries_cursor);
+    Some(out)
+}
+
+fn matching_indices_in_block_palette(
+    cursor: &mut &[u8],
+    version: JavaMinecraftVersion,
+    matches: &mut impl FnMut(i32) -> bool,
+) -> Option<Vec<usize>> {
+    let bits_per_entry = cursor.get_u8().ok()?;
+    let indirect = bits_per_entry <= MAX_INDIRECT_BLOCK_BITS;
+    let mut palette = Vec::new();
+    if bits_per_entry == 0 || indirect {
+        let palette_len = if bits_per_entry == 0 {
+            1
+        } else {
+            usize::try_from(cursor.get_var_int().ok()?.0).ok()?
+        };
+        if palette_len == 0 || palette_len > BLOCKS_PER_SECTION {
+            return None;
+        }
+        for _ in 0..palette_len {
+            palette.push(cursor.get_var_int().ok()?.0);
+        }
+    } else if bits_per_entry > 32 {
+        return None;
+    }
+
+    let long_count = if version < JavaMinecraftVersion::V_1_21_5 {
+        usize::try_from(cursor.get_var_int().ok()?.0).ok()?
+    } else {
+        packed_long_count(BLOCKS_PER_SECTION, bits_per_entry)
+    };
+    if long_count > packed_long_count(BLOCKS_PER_SECTION, bits_per_entry) {
+        return None;
+    }
+    let mut words = Vec::with_capacity(long_count);
+    for _ in 0..long_count {
+        words.push(cursor.get_i64_be().ok()? as u64);
+    }
+
+    if bits_per_entry == 0 {
+        return Some(if matches(palette[0]) {
+            (0..BLOCKS_PER_SECTION).collect()
+        } else {
+            Vec::new()
+        });
+    }
+
+    let per_long = 64 / usize::from(bits_per_entry);
+    let mask = (1u64 << bits_per_entry) - 1;
+    let mut found = Vec::new();
+    for index in 0..BLOCKS_PER_SECTION {
+        let word = *words.get(index / per_long)?;
+        let palette_index = ((word >> ((index % per_long) * usize::from(bits_per_entry))) & mask)
+            as usize;
+        let state = if indirect {
+            *palette.get(palette_index)?
+        } else {
+            i32::try_from(palette_index).ok()?
+        };
+        if matches(state) {
+            found.push(index);
+        }
+    }
+    Some(found)
+}
+
+fn pack_block_position(x: i64, y: i64, z: i64) -> i64 {
+    (((x as u64) & 0x03ff_ffff) << 38
+        | ((z as u64) & 0x03ff_ffff) << 12
+        | ((y as u64) & 0x0fff)) as i64
+}
+
+fn unpack_block_position(position: i64) -> (i32, i32, i32) {
+    let bits = position as u64;
+    let x = (((bits >> 38) & 0x03ff_ffff) as i32 << 6) >> 6;
+    let z = (((bits >> 12) & 0x03ff_ffff) as i32 << 6) >> 6;
+    let y = ((bits & 0x0fff) as i32 << 20) >> 20;
+    (x, y, z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +534,95 @@ mod tests {
         payload.write_var_int(&VarInt(0)).unwrap();
         payload.extend_from_slice(&[7, 7, 7]);
         payload
+    }
+
+    #[test]
+    fn finds_matching_positions_in_a_single_value_section() {
+        let version = JavaMinecraftVersion::V_1_21_4;
+        let stone = i32::from(pumpkin_data::Block::STONE.default_state.id.as_u16());
+        let payload = remap_chunk_payload(&chunk_1_21_4(stone), version).unwrap();
+        let mapped = i32::from(remap_block_state_for_version(
+            u16::try_from(stone).unwrap(),
+            version,
+        ));
+
+        let found = matching_block_positions(&payload, version, -64, |state| state == mapped)
+            .expect("remapped chunk should scan");
+        assert_eq!(found.len(), BLOCKS_PER_SECTION);
+        assert!(found.contains(&pack_block_position(48, -64, -64)));
+        assert!(found.contains(&pack_block_position(63, -49, -49)));
+    }
+
+    #[test]
+    fn finds_a_matching_index_in_an_indirect_palette() {
+        let mut palette = Vec::new();
+        palette.write_u8(4).unwrap();
+        palette.write_var_int(&VarInt(2)).unwrap();
+        palette.write_var_int(&VarInt(0)).unwrap();
+        palette.write_var_int(&VarInt(42)).unwrap();
+        palette.write_var_int(&VarInt(256)).unwrap();
+        palette.write_i64_be(1).unwrap(); // index zero selects palette entry one
+        for _ in 1..256 {
+            palette.write_i64_be(0).unwrap();
+        }
+
+        let mut cursor = palette.as_slice();
+        let found = matching_indices_in_block_palette(
+            &mut cursor,
+            JavaMinecraftVersion::V_1_21_4,
+            &mut |state| state == 42,
+        )
+        .expect("indirect palette should scan");
+        assert!(cursor.is_empty());
+        assert_eq!(found, [0]);
+    }
+
+    #[test]
+    fn remaps_direct_block_states_without_changing_the_palette_width() {
+        let version = JavaMinecraftVersion::V_1_21_4;
+        let source = i32::from(pumpkin_data::Block::STONE.default_state.id.as_u16());
+        let expected = remap_block_state_for_version(u16::try_from(source).unwrap(), version);
+        let bits = 16;
+        let per_long = 64 / usize::from(bits);
+        let long_count = packed_long_count(BLOCKS_PER_SECTION, bits);
+
+        let mut input = Vec::new();
+        input.write_u8(bits).unwrap();
+        input
+            .write_var_int(&VarInt(i32::try_from(long_count).unwrap()))
+            .unwrap();
+        for long_index in 0..long_count {
+            let mut packed = 0u64;
+            for slot in 0..per_long {
+                if long_index * per_long + slot >= BLOCKS_PER_SECTION {
+                    break;
+                }
+                packed |= u64::try_from(source).unwrap() << (slot * usize::from(bits));
+            }
+            input.write_i64_be(packed as i64).unwrap();
+        }
+
+        let mut cursor = input.as_slice();
+        let mut output = Vec::new();
+        copy_container(
+            &mut cursor,
+            &mut output,
+            BLOCKS_PER_SECTION,
+            MAX_INDIRECT_BLOCK_BITS,
+            Some(version),
+            version,
+        )
+        .expect("direct palette should remap");
+        assert!(cursor.is_empty());
+
+        let mut rewritten = output.as_slice();
+        assert_eq!(rewritten.get_u8().unwrap(), bits);
+        assert_eq!(
+            rewritten.get_var_int().unwrap().0,
+            i32::try_from(long_count).unwrap()
+        );
+        let first_word = rewritten.get_i64_be().unwrap() as u64;
+        assert_eq!(first_word & ((1u64 << bits) - 1), u64::from(expected));
     }
 
     #[test]

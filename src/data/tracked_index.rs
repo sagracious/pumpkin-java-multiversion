@@ -38,6 +38,12 @@ pub fn tracked_index_for_version(
     index: u8,
     version: JavaMinecraftVersion,
 ) -> Option<u8> {
+    // The shared per-entity index table currently ends at 1.16.2. Do not
+    // silently reuse that layout for earlier clients while their rules are
+    // still being ported.
+    if version < JavaMinecraftVersion::V_1_16_2 {
+        return None;
+    }
     // An entity type the client does not have is spawned as a stand in whose
     // layout only shares the base fields 0 to 7.
     let absent = absent(entity_type, version);
@@ -350,6 +356,12 @@ fn is_water_creature(entity_type: u16) -> bool {
 mod tests {
     use super::*;
     use JavaMinecraftVersion as V;
+
+    #[test]
+    fn older_than_the_audited_index_floor_fails_closed() {
+        assert_eq!(tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_15_2), None);
+        assert_eq!(tracked_index_for_version(EntityType::PIG.id, 18, V::V_1_16_2), Some(18));
+    }
 
     #[test]
     fn fox_flags_move_down_one_on_1_21_11() {

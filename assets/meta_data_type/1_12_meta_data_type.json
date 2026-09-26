@@ -1,0 +1,1 @@
+{"byte":0,"integer":1,"float":2,"string":3,"text_component":4,"item_stack":5,"boolean":6,"rotation":7,"block_pos":8,"optional_block_pos":9,"facing":10,"optional_uuid":11,"optional_block_state":12,"nbt_compound":13}

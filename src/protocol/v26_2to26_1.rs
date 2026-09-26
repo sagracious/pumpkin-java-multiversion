@@ -28,6 +28,7 @@ impl Protocol for Protocol26_2To26_1 {
             &clientbound::play::SECTION_BLOCKS_UPDATE,
             section_blocks_update_bed_entities,
         );
+        reg.clientbound(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk_bed_entities);
         reg.clientbound(&clientbound::play::SET_ENTITY_DATA, sulfur_cube_metadata);
         reg.serverbound(&serverbound::play::SPECTATE_ENTITY, spectate_entity);
     }
@@ -176,6 +177,39 @@ fn section_blocks_update_bed_entities(
     Ok(())
 }
 
+fn chunk_bed_entities(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let positions = crate::packet::chunk_remap::matching_block_positions(
+        wrapper.remaining(),
+        ctx.layout,
+        connection.entity_tracker.min_y,
+        |state| state_is_26_2_bed(state, ctx.layout),
+    )
+    .ok_or(TranslateError::Unsupported("chunk bed block entities"))?;
+    if positions.is_empty() {
+        wrapper.passthrough_all();
+        return Ok(());
+    }
+
+    let entity_type = bed_block_entity_type_id(ctx.layout)
+        .ok_or(TranslateError::Unsupported("bed block entity type"))?;
+    let additions: Vec<_> = positions
+        .into_iter()
+        .map(|position| (position, entity_type))
+        .collect();
+    let rewritten = crate::packet::chunk_remap::append_chunk_block_entities(
+        wrapper.remaining(),
+        ctx.layout,
+        &additions,
+    )
+    .ok_or(TranslateError::Unsupported("chunk block entities"))?;
+    wrapper.replace_remaining(rewritten);
+    Ok(())
+}
+
 fn state_is_26_2_bed(client_state: i32, version: V) -> bool {
     let Ok(client_state) = u32::try_from(client_state) else {
         return false;
@@ -198,22 +232,24 @@ fn state_is_26_2_bed(client_state: i32, version: V) -> bool {
     (1931..=2186).contains(&state_26_2)
 }
 
+fn bed_block_entity_type_id(version: V) -> Option<i32> {
+    let bed_id_26_3 = MappingData::get()
+        .composed(V::V_26_1)
+        .blockentities
+        .inverse()
+        .map(25)?;
+    MappingData::get()
+        .composed(version)
+        .blockentities
+        .map(bed_id_26_3)
+        .and_then(|id| i32::try_from(id).ok())
+}
+
 fn bed_block_entity_payload(position: i64, version: V) -> Option<Vec<u8>> {
     let mut payload = Vec::new();
     payload.write_i64_be(position).ok()?;
     if version >= V::V_1_18 {
-        let bed_id_26_3 = MappingData::get()
-            .composed(V::V_26_1)
-            .blockentities
-            .inverse()
-            .map(25)?;
-        let bed_id = MappingData::get()
-            .composed(version)
-            .blockentities
-            .map(bed_id_26_3)?;
-        VAR_INT
-            .write(&mut payload, &VarInt(i32::try_from(bed_id).ok()?))
-            .ok()?;
+        VAR_INT.write(&mut payload, &VarInt(bed_block_entity_type_id(version)?)).ok()?;
     } else {
         // Before 1.18 the packet uses the block-entity action byte, where 11 is bed.
         U8.write(&mut payload, &11).ok()?;
@@ -242,7 +278,7 @@ mod tests {
     use super::*;
     use crate::api::types::{TextComponentT, WireType};
     use pumpkin_nbt::tag::NbtTag;
-    use pumpkin_protocol::ser::NetworkWriteExt;
+    use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 
     fn run(
         packet: &'static crate::packet::mappings::PacketId,
@@ -446,6 +482,68 @@ mod tests {
             let expected = (18_i64 << 38) | (36_i64 << 12) | 51_i64;
             assert_eq!(I64T.read(&mut extra).unwrap(), expected, "{version}");
         }
+    }
+
+    #[test]
+    fn chunk_load_emits_a_bed_block_entity_for_legacy_clients() {
+        let version = V::V_26_1;
+        let mut sections = Vec::new();
+        sections.write_i16_be(1).unwrap(); // one non-air block
+        sections.write_i16_be(0).unwrap(); // fluid count
+        sections.write_u8(4).unwrap();
+        VAR_INT.write(&mut sections, &VarInt(2)).unwrap();
+        VAR_INT.write(&mut sections, &VarInt(0)).unwrap(); // air
+        VAR_INT
+            .write(&mut sections, &VarInt(bed_state_for(version)))
+            .unwrap();
+        sections.write_i64_be(1).unwrap(); // block index zero is a bed
+        for _ in 1..256 {
+            sections.write_i64_be(0).unwrap();
+        }
+        sections.write_u8(0).unwrap(); // single biome palette
+        VAR_INT.write(&mut sections, &VarInt(0)).unwrap();
+
+        let mut payload = Vec::new();
+        payload.write_i32_be(3).unwrap();
+        payload.write_i32_be(-4).unwrap();
+        VAR_INT.write(&mut payload, &VarInt(0)).unwrap(); // empty heightmap list
+        VAR_INT
+            .write(&mut payload, &VarInt(i32::try_from(sections.len()).unwrap()))
+            .unwrap();
+        payload.extend_from_slice(&sections);
+        VAR_INT.write(&mut payload, &VarInt(0)).unwrap(); // no block entities
+        payload.extend_from_slice(&[0, 0]); // light tail
+
+        let mut connection = UserConnection::new(9, version);
+        connection.entity_tracker.min_y = -64;
+        let context = Ctx {
+            step: Protocol26_2To26_1.step(),
+            mappings: MappingData::get().step(V::V_26_2),
+            layout: version,
+        };
+        let mut wrapper = PacketWrapper::new(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, &payload);
+        chunk_bed_entities(&mut wrapper, &mut connection, &context).unwrap();
+
+        let output = wrapper.finish_with_outputs().unwrap();
+        assert!(output.extra.is_empty());
+        let mut read = output.payload.as_slice();
+        assert_eq!(read.get_i32_be().unwrap(), 3);
+        assert_eq!(read.get_i32_be().unwrap(), -4);
+        assert_eq!(read.get_var_int().unwrap().0, 0); // heightmaps
+        let section_len = usize::try_from(read.get_var_int().unwrap().0).unwrap();
+        read = read.get(section_len..).unwrap();
+        assert_eq!(read.get_var_int().unwrap().0, 1); // synthesized bed
+        assert_eq!(read.get_u8().unwrap(), 0x00); // local X/Z at the chunk origin
+        assert_eq!(read.get_i16_be().unwrap(), -64);
+        assert_eq!(
+            VAR_INT.read(&mut read).unwrap().0,
+            bed_block_entity_type_id(version).unwrap()
+        );
+        assert!(matches!(
+            NbtT::for_version(version).read(&mut read).unwrap(),
+            Some(NbtTag::Compound(_))
+        ));
+        assert_eq!(read, [0, 0]); // light tail preserved
     }
 
     #[test]

@@ -47,6 +47,15 @@ macro_rules! types {
 
 /// Oldest first; a version without a file of its own reads the newest older one.
 static FILES: &[TypeFile] = &[
+    // 1.10 uses the 1.9 entity-data serializer table.
+    types!(V_1_9, "1_9_meta_data_type.json"),
+    // 1.11.1 and 1.12 retain the same serializer IDs; only metadata entries
+    // and entity layouts change at those boundaries.
+    types!(V_1_11, "1_12_meta_data_type.json"),
+    types!(V_1_12, "1_12_meta_data_type.json"),
+    types!(V_1_13, "1_13_meta_data_type.json"),
+    types!(V_1_13_2, "1_13_2_meta_data_type.json"),
+    types!(V_1_14, "1_14_meta_data_type.json"),
     // ViaVersion Types1_14 is shared by 1.15.2, 1.16 and 1.16.1.
     types!(V_1_15_2, "1_15_2_meta_data_type.json"),
     types!(V_1_16, "1_15_2_meta_data_type.json"),
@@ -196,7 +205,8 @@ fn tables() -> &'static Tables {
     })
 }
 
-/// Maps a 26.3 serializer id onto `version`, `None` for a type it does not have.
+/// Maps a 26.3 serializer id onto `version`, `None` for a type it does not have
+/// or when the version predates the oldest checked-in serializer table.
 #[must_use]
 pub fn meta_data_type_id_for_version(id: i32, version: JavaMinecraftVersion) -> Option<i32> {
     let tables = tables();
@@ -205,7 +215,6 @@ pub fn meta_data_type_id_for_version(id: i32, version: JavaMinecraftVersion) -> 
         .iter()
         .rev()
         .find(|(file, _)| *file <= version)
-        .or_else(|| tables.ids.last())
         .map(|(_, table)| table)?;
     table.get(usize::try_from(id).ok()?).copied().flatten()
 }
@@ -310,6 +319,27 @@ mod tests {
                 "{version}"
             );
         }
+    }
+
+    #[test]
+    fn serializer_ids_fail_closed_before_the_oldest_checked_in_table() {
+        assert_eq!(meta_data_type_id_for_version(1, V_1_8), None);
+        assert_eq!(canonical_meta_data_type_id_for_version(1, V_1_8), None);
+    }
+
+    #[test]
+    fn serializer_ids_follow_the_pre_1_15_boundaries() {
+        assert_eq!(meta_data_type_id_for_name("item_stack", V_1_9), Some(5));
+        assert_eq!(meta_data_type_id_for_name("item_stack", V_1_12), Some(5));
+        assert_eq!(meta_data_type_id_for_name("item_stack", V_1_13), Some(6));
+        assert_eq!(meta_data_type_id_for_name("item_stack", V_1_14), Some(6));
+        assert_eq!(meta_data_type_id_for_name("villager_data", V_1_13_2), None);
+        assert_eq!(meta_data_type_id_for_name("villager_data", V_1_14), Some(16));
+        assert_eq!(
+            canonical_meta_data_type_id_for_version(13, V_1_14),
+            Some(15),
+            "the shared old block-state serializer is the optional form"
+        );
     }
 
     #[test]

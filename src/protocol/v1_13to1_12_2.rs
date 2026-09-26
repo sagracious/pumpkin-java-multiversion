@@ -11,6 +11,8 @@ const V1_13: JavaMinecraftVersion = JavaMinecraftVersion::V_1_13;
 const V1_12_2: JavaMinecraftVersion = JavaMinecraftVersion::V_1_12_2;
 const V1_20_3: JavaMinecraftVersion = JavaMinecraftVersion::V_1_20_3;
 const V26_2: JavaMinecraftVersion = JavaMinecraftVersion::V_26_2;
+const VELOCITY_FORWARDING_CHANNEL: &str = "velocity:player_info";
+const VINE_FORWARDING_CHANNEL: &str = "vine:player_info";
 
 pub struct Protocol1_13To1_12_2;
 
@@ -492,6 +494,15 @@ fn login_custom_query(
     _ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     let id = wrapper.read(&VAR_INT)?;
+    let channel = wrapper.read(&STRING)?;
+    if matches!(channel.as_ref(), VELOCITY_FORWARDING_CHANNEL | VINE_FORWARDING_CHANNEL) {
+        // These login queries authenticate the proxy connection, not a 1.13
+        // client feature. Let Velocity/Vine answer them unchanged.
+        wrapper.write(&VAR_INT, &id)?;
+        wrapper.write(&STRING, &channel)?;
+        wrapper.passthrough_all();
+        return Ok(());
+    }
     wrapper.consume_remaining();
     wrapper.send_serverbound(
         &serverbound::login::CUSTOM_QUERY_ANSWER,
@@ -755,6 +766,29 @@ mod tests {
             serverbound::login::CUSTOM_QUERY_ANSWER.to_id(V1_12_2)
         );
         assert_eq!(output.serverbound[0].1, [37, 0]);
+    }
+
+    #[test]
+    fn forwarding_authentication_queries_pass_through_unchanged() {
+        for channel in [VELOCITY_FORWARDING_CHANNEL, VINE_FORWARDING_CHANNEL] {
+            let mut input = Vec::new();
+            VAR_INT.write(&mut input, &VarInt(37)).unwrap();
+            STRING.write(&mut input, &channel.into()).unwrap();
+            input.extend_from_slice(b"forwarding payload");
+
+            let mut wrapper = PacketWrapper::new(&clientbound::login::CUSTOM_QUERY, &input);
+            login_custom_query(
+                &mut wrapper,
+                &mut UserConnection::new(0, V1_12_2),
+                &context(V1_13),
+            )
+            .unwrap();
+
+            let output = wrapper.finish_with_outputs().unwrap();
+            assert!(!output.cancelled, "{channel}");
+            assert!(output.serverbound.is_empty(), "{channel}");
+            assert_eq!(output.payload, input, "{channel}");
+        }
     }
 
     #[test]

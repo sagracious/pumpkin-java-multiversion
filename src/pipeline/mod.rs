@@ -214,10 +214,32 @@ mod tests {
     fn steps_run_from_26_3_down_to_the_client() {
         assert_eq!(steps_for(JavaMinecraftVersion::V_26_3), 0);
         assert_eq!(steps_for(JavaMinecraftVersion::V_26_2), 1);
-        assert_eq!(steps_for(JavaMinecraftVersion::V_1_16_2), STEPS.len());
+        assert_eq!(
+            steps_for(JavaMinecraftVersion::V_1_16_2),
+            STEPS
+                .iter()
+                .position(|protocol| {
+                    protocol.step().to == JavaMinecraftVersion::V_1_16_2
+                })
+                .unwrap()
+                + 1
+        );
         let last = STEPS[steps_for(JavaMinecraftVersion::V_1_18_2) - 1].step();
         assert_eq!(last.from, JavaMinecraftVersion::V_1_19);
         assert_eq!(last.to, JavaMinecraftVersion::V_1_18_2);
+    }
+
+    #[test]
+    fn registered_steps_and_version_endpoints_form_one_contiguous_chain() {
+        assert_eq!(crate::protocol::VERSIONS.len(), STEPS.len() + 1);
+        for (index, protocol) in STEPS.iter().enumerate() {
+            let step = protocol.step();
+            assert_eq!(crate::protocol::VERSIONS[index], step.from);
+            assert_eq!(crate::protocol::VERSIONS[index + 1], step.to);
+            if let Some(next) = STEPS.get(index + 1) {
+                assert_eq!(step.to, next.step().from);
+            }
+        }
     }
 
     /// A layout handler at the 1.20.5 boundary is owed only where core did not

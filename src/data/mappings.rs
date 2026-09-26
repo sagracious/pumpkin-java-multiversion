@@ -77,6 +77,12 @@ const STEPS: &[StepFile] = &[
     step!(V_1_14_2, V_1_14_1),
     step!(V_1_14_1, V_1_14),
     step!(V_1_14, V_1_13_2, "mappings-1.14to1.13.2.nbt"),
+    step!(V_1_13_2, V_1_13_1),
+    step!(V_1_13_1, V_1_13),
+    step!(V_1_13, V_1_12_2, "mappings-1.13to1.12.nbt"),
+    step!(V_1_12_2, V_1_12_1),
+    step!(V_1_12_1, V_1_12),
+    step!(V_1_12, V_1_11_1, "mappings-1.12to1.11.nbt"),
 ];
 
 struct StepOverride {
