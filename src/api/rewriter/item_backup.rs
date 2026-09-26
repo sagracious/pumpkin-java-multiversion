@@ -574,7 +574,7 @@ mod tests {
     use super::*;
     use crate::api::MappingData;
     use crate::api::rewriter::item::StructuredItemRewriter;
-    use crate::api::types::{ItemT, WireType};
+    use crate::api::types::{ItemT, NbtT, VAR_INT, WireType};
     use pumpkin_data::data_component_impl::{get_i32_hash, get_str_hash};
     use pumpkin_data::item::Item as DataItem;
     use pumpkin_util::version::JavaMinecraftVersion as V;
@@ -679,10 +679,31 @@ mod tests {
             .write(&mut client_bytes, &downgraded)
             .unwrap();
         let mut client_reader = client_bytes.as_slice();
-        let client_item = ItemT::for_version(version)
-            .read(&mut client_reader)
-            .unwrap();
+        let count = VAR_INT.read(&mut client_reader).unwrap().0;
+        let client_item_id = VAR_INT.read(&mut client_reader).unwrap().0;
+        let added_count = VAR_INT.read(&mut client_reader).unwrap().0;
+        let removed_count = VAR_INT.read(&mut client_reader).unwrap().0;
+        assert_eq!(count, 1);
+        assert_eq!(removed_count, 0);
+        let mut added = Vec::new();
+        for _ in 0..added_count {
+            let id = VAR_INT.read(&mut client_reader).unwrap().0;
+            let before = client_reader;
+            let nbt = NbtT::for_version(version).read(&mut client_reader).unwrap();
+            assert!(matches!(nbt, Some(NbtTag::Compound(_))));
+            let data = before[..before.len() - client_reader.len()].to_vec();
+            added.push(ItemComponent { id, data });
+        }
         assert!(client_reader.is_empty());
+        // Pumpkin's pinned item reader uses its 26.3 component ID table even
+        // when parsing a target-version item. Decode these two NBT components
+        // with their target IDs explicitly instead.
+        let client_item = Item::Structured {
+            count,
+            id: client_item_id,
+            added,
+            removed: Vec::new(),
+        };
         let mut full_item = StructuredItemRewriter::to_native(&client_item, version, ids);
         let other_connection = UserConnection::new(18, version);
         restore_full_item(&other_connection, &mut full_item, version, ids);

@@ -297,10 +297,13 @@ mod tests {
         let mut payload = vec![9, 8];
         payload.extend([0u8; 11]);
         let mut read: &[u8] = &payload;
+        let entries = EntityDataListT::for_version(V::V_1_15_2)
+            .read(&mut read)
+            .unwrap();
+        assert!(entries.is_empty());
         assert!(
-            EntityDataListT::for_version(V::V_1_15_2)
-                .read(&mut read)
-                .is_err()
+            read.is_empty(),
+            "unmeasurable metadata is discarded as a suffix"
         );
     }
 

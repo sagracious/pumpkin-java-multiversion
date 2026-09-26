@@ -7,7 +7,9 @@ use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::{item_component, item_nbt};
 use crate::api::types::{Item, ItemComponent, ItemT, WireType, component_payload_len};
-use crate::api::{ComposedMappings, IdMapping, PacketWrapper, TranslateError, UserConnection};
+use crate::api::{
+    ComposedMappings, IdMapping, MappingData, PacketWrapper, TranslateError, UserConnection,
+};
 
 pub struct StructuredItemRewriter;
 
@@ -605,12 +607,17 @@ pub fn rewrite_item(
     Ok(())
 }
 
-/// The seam for a stack nested in something else, such as entity metadata or
-/// a particle.
+/// Reads a native 26.3 stack nested in something else, such as entity metadata
+/// or a particle, and writes the target-version item form.
 #[must_use]
 pub fn rewrite_item_value(input: &mut &[u8], layout: V, ids: &ComposedMappings) -> Option<Vec<u8>> {
+    let source_ids = MappingData::get().composed(V::V_26_3);
+    let item = ClientboundItemT::new(V::V_26_3, source_ids)
+        .read(input)
+        .ok()?;
+    let item = StructuredItemRewriter::to_version(&item, layout, ids);
     let mut out = Vec::new();
-    rewrite_item(input, &mut out, layout, ids).ok()?;
+    ItemT::for_version(layout).write(&mut out, &item).ok()?;
     Some(out)
 }
 

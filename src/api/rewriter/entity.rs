@@ -8,7 +8,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::connection::GameTimeStorage;
 use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
-use crate::api::rewriter::particle::write_particle;
+use crate::api::rewriter::particle::{ParticleData, write_particle};
 use crate::api::types::{VAR_INT, VAR_LONG, WireType};
 use crate::api::{MappingData, PacketWrapper, TranslateError, UserConnection};
 use crate::data::entity_data_types::{
@@ -62,31 +62,61 @@ fn rewrite_entries(
     ids: &ComposedMappings,
     game_time: i64,
 ) -> Vec<EntityDataEntry> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            // The 26.3 cushion is represented by a falling block for 26.2.
-            // Only base-entity metadata indices 0 through 7 are meaningful on
-            // that stand-in; ViaBackwards cancels every later field.
-            if server_entity_type == pumpkin_data::entity::EntityType::CUSHION.id
-                && client_entity_type == pumpkin_data::entity::EntityType::FALLING_BLOCK.id
-                && entry.index > 7
-            {
-                return None;
+    let mut rewritten = Vec::with_capacity(entries.len() + 1);
+    for entry in entries {
+        // Up to 1.20.3 the area effect cloud stores color at index 9 and its
+        // waiting flag at 10. Newer servers fold that color into the
+        // entity-effect particle at index 10, so recover the old color before
+        // dropping the particle for clients that cannot represent the shape.
+        if server_entity_type == pumpkin_data::entity::EntityType::AREA_EFFECT_CLOUD.id
+            && layout <= JavaMinecraftVersion::V_1_20_3
+            && entry.index == 10
+            && let MetaValue::Particle(particle) = &entry.value
+            && particle.id == i32::from(pumpkin_data::particle::Particle::EntityEffect.to_id())
+            && let ParticleData::Color(color) = particle.data
+        {
+            let mut value = Vec::new();
+            if VAR_INT.write(&mut value, &VarInt(color)).is_err() {
+                continue;
             }
-            if stand_in_metadata_removed(server_entity_type, entry.index, layout) {
-                return None;
+            if let Some(serializer) = meta_data_type_id_for_name("int", layout) {
+                rewritten.push(EntityDataEntry {
+                    index: 9,
+                    serializer,
+                    value: MetaValue::Raw(value),
+                });
             }
-            let index = tracked_index_for_version(client_entity_type, entry.index, layout)?;
-            let (serializer, value) =
-                rewrite_entry_value(server_entity_type, entry, layout, ids, game_time)?;
-            Some(EntityDataEntry {
-                index,
-                serializer,
-                value,
-            })
-        })
-        .collect()
+            continue;
+        }
+
+        // The 26.3 cushion is represented by a falling block for 26.2.
+        // Only base-entity metadata indices 0 through 7 are meaningful on
+        // that stand-in; ViaBackwards cancels every later field.
+        if server_entity_type == pumpkin_data::entity::EntityType::CUSHION.id
+            && client_entity_type == pumpkin_data::entity::EntityType::FALLING_BLOCK.id
+            && entry.index > 7
+        {
+            continue;
+        }
+        if stand_in_metadata_removed(server_entity_type, entry.index, layout) {
+            continue;
+        }
+        let Some(index) = tracked_index_for_version(client_entity_type, entry.index, layout) else {
+            continue;
+        };
+        let Some((serializer, value)) =
+            rewrite_entry_value(server_entity_type, entry, layout, ids, game_time)
+        else {
+            continue;
+        };
+        rewritten.push(EntityDataEntry {
+            index,
+            serializer,
+            value,
+        });
+    }
+    rewritten.sort_by_key(|entry| entry.index);
+    rewritten
 }
 
 fn stand_in_metadata_removed(
@@ -400,8 +430,13 @@ mod tests {
             (V::V_1_18_2, v1_18_2),
             (V::V_1_16_2, v1_16_2),
         ] {
+            let mut input = pig_list();
+            if layout == V::V_1_21_4 {
+                // 1.21.4 calls the canonical particle-list serializer 18.
+                input[11] = 18;
+            }
             assert_eq!(
-                translate(&pig_list(), EntityType::PIG.id, layout),
+                translate(&input, EntityType::PIG.id, layout),
                 want,
                 "{layout}"
             );
@@ -415,31 +450,90 @@ mod tests {
         assert!(!out.windows(2).any(|pair| pair == [10, 17]));
     }
 
-    /// 1.20.5 folded the cloud colour into the particle, so the particle entry
-    /// cannot be read below it and the waiting flag moves up for the colour.
+    /// 1.20.5 stores the cloud color in the entity-effect particle; 1.20.3
+    /// needs that color restored to its own metadata field.
     #[test]
-    fn an_area_effect_cloud_loses_its_particle_below_1_20_5() {
-        let effect = u8::try_from(Particle::EntityEffect.to_id()).unwrap();
-        let mut payload = vec![7u8, 8, 3];
-        payload.extend(3.0f32.to_be_bytes());
-        payload.extend([9, 8, 0, 10, 16, effect, 0x11, 0x22, 0x33, 0x44, TERMINATOR]);
-
+    fn a_cloud_effect_color_is_restored_below_1_20_5() {
         let cloud = EntityType::AREA_EFFECT_CLOUD.id;
-        let mut want = vec![7u8, 8, 3];
-        want.extend(3.0f32.to_be_bytes());
-        want.extend([10, 8, 0, TERMINATOR]);
-        assert_eq!(translate(&payload, cloud, V::V_1_20_3), want);
+        let entries = vec![
+            EntityDataEntry {
+                index: 8,
+                serializer: meta_data_type_id_for_name("float", V::V_26_3).unwrap(),
+                value: MetaValue::Raw(3.0f32.to_be_bytes().to_vec()),
+            },
+            EntityDataEntry {
+                index: 9,
+                serializer: meta_data_type_id_for_name("boolean", V::V_26_3).unwrap(),
+                value: MetaValue::Raw(vec![0]),
+            },
+            EntityDataEntry {
+                index: 10,
+                serializer: meta_data_type_id_for_name("particle", V::V_26_3).unwrap(),
+                value: MetaValue::Particle(crate::api::rewriter::particle::Particle {
+                    id: i32::from(Particle::EntityEffect.to_id()),
+                    data: ParticleData::Color(0x1122_3344),
+                }),
+            },
+        ];
+        let before_1_20_5 = rewrite_entries(
+            cloud,
+            cloud,
+            &entries,
+            V::V_1_20_3,
+            MappingData::get().composed(V::V_1_20_3),
+            0,
+        );
+        assert_eq!(
+            before_1_20_5
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            [8, 9, 10]
+        );
+        assert_eq!(
+            before_1_20_5[1].serializer,
+            meta_data_type_id_for_name("int", V::V_1_20_3).unwrap()
+        );
+        let MetaValue::Raw(color) = &before_1_20_5[1].value else {
+            panic!("legacy cloud color is a varint");
+        };
+        let mut color_reader = color.as_slice();
+        assert_eq!(VAR_INT.read(&mut color_reader).unwrap().0, 0x1122_3344);
+        assert!(color_reader.is_empty());
+        assert_eq!(
+            before_1_20_5[2].serializer,
+            meta_data_type_id_for_name("boolean", V::V_1_20_3).unwrap()
+        );
 
         let mapped = MappingData::get()
             .composed(V::V_1_20_5)
             .particles
             .map(u32::from(Particle::EntityEffect.to_id()))
             .unwrap();
-        let mut want = vec![7u8, 8, 3];
-        want.extend(3.0f32.to_be_bytes());
-        want.extend([9, 8, 0, 10, 17, u8::try_from(mapped).unwrap()]);
-        want.extend([0x11, 0x22, 0x33, 0x44, TERMINATOR]);
-        assert_eq!(translate(&payload, cloud, V::V_1_20_5), want);
+        let at_1_20_5 = rewrite_entries(
+            cloud,
+            cloud,
+            &entries,
+            V::V_1_20_5,
+            MappingData::get().composed(V::V_1_20_5),
+            0,
+        );
+        assert_eq!(at_1_20_5[1].index, 9);
+        assert_eq!(
+            at_1_20_5[1].serializer,
+            meta_data_type_id_for_name("boolean", V::V_1_20_5).unwrap()
+        );
+        assert_eq!(at_1_20_5[2].index, 10);
+        assert_eq!(
+            at_1_20_5[2].serializer,
+            meta_data_type_id_for_name("particle", V::V_1_20_5).unwrap()
+        );
+        let MetaValue::Raw(particle) = &at_1_20_5[2].value else {
+            panic!("particle metadata is emitted as target bytes");
+        };
+        let mut particle_reader = particle.as_slice();
+        assert_eq!(VAR_INT.read(&mut particle_reader).unwrap().0, mapped as i32);
+        assert_eq!(particle_reader, [0x11, 0x22, 0x33, 0x44]);
     }
 
     /// An entity the client has no type for is a stand in, and only the base
@@ -590,7 +684,8 @@ mod tests {
 
         let key = 0x656e74_u64;
         crate::api::remove_connection(key);
-        let mut data = vec![7u8, 0, 0, 0x08, 9, 3];
+        // 1.16.2's wire serializer id for float is 2; health is tracked at 8.
+        let mut data = vec![7u8, 0, 0, 8, 2];
         data.extend(health());
         data.push(TERMINATOR);
         let before = crate::pipeline::translate_clientbound(
@@ -631,32 +726,33 @@ mod tests {
     #[test]
     fn a_particle_the_client_lacks_leaves_the_list_shorter() {
         let layout = V::V_1_21_4;
-        let effect = u8::try_from(Particle::EntityEffect.to_id()).unwrap();
-        let geyser = u8::try_from(Particle::GeyserBase.to_id()).unwrap();
+        use crate::api::rewriter::particle::{Particle as CanonicalParticle, ParticleData};
 
-        let mut payload = vec![7u8, 10, 17, 2, effect, 0x11, 0x22, 0x33, 0x44, geyser];
-        payload.extend(5i32.to_be_bytes());
-        payload.extend(1.0f32.to_be_bytes());
-        payload.push(TERMINATOR);
-
-        let mapped = MappingData::get()
-            .composed(layout)
+        let effect = CanonicalParticle {
+            id: i32::from(Particle::EntityEffect.to_id()),
+            data: ParticleData::Color(0x1122_3344),
+        };
+        let geyser = CanonicalParticle {
+            id: i32::from(Particle::GeyserBase.to_id()),
+            data: ParticleData::Geyser {
+                water_blocks: 5,
+                impulse: 1.0,
+            },
+        };
+        let ids = MappingData::get().composed(layout);
+        let mapped = ids
             .particles
             .map(u32::from(Particle::EntityEffect.to_id()))
             .unwrap();
-        let want = vec![
-            7,
-            10,
-            18,
-            1,
-            u8::try_from(mapped).unwrap(),
-            0x11,
-            0x22,
-            0x33,
-            0x44,
-            TERMINATOR,
-        ];
-        assert_eq!(translate(&payload, EntityType::PIG.id, layout), want);
+        let MetaValue::Raw(rewritten) =
+            rewrite_value(&MetaValue::Particles(vec![effect, geyser]), layout, ids).unwrap()
+        else {
+            panic!("particle list is emitted as wire bytes");
+        };
+        assert_eq!(
+            rewritten,
+            [1, u8::try_from(mapped).unwrap(), 0x11, 0x22, 0x33, 0x44]
+        );
     }
 }
 
@@ -863,18 +959,18 @@ mod cushion_and_nested_item_tests {
             panic!("item metadata stays an item");
         };
         let mut item_input = bytes.as_slice();
-        let mapped = ItemT::for_version(V::V_26_2)
-            .read(&mut item_input)
-            .expect("nested item uses target layout");
-        let WireItem::Structured { added, .. } = mapped else {
-            panic!("diamond remains a structured item");
-        };
-        assert_eq!(added.len(), 1);
+        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1); // count
+        VAR_INT.read(&mut item_input).unwrap(); // mapped diamond id
+        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1); // added
+        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 0); // removed
         assert_eq!(
-            added[0].id,
+            VAR_INT.read(&mut item_input).unwrap().0,
             i32::from(DataComponent::AttackAnimation.to_id()),
-            "26.3 interact animation collapses onto 26.2 attack animation"
+            "26.3 interaction animation collapses onto 26.2 attack animation"
         );
+        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 1);
+        assert_eq!(VAR_INT.read(&mut item_input).unwrap().0, 6);
+        assert!(item_input.is_empty());
     }
 }
 
