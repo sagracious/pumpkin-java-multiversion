@@ -873,16 +873,18 @@ mod tests {
         let target = V::V_1_16_2;
         let item_id = i32::from(pumpkin_data::item::Item::DIAMOND.id);
         let mut connection = UserConnection::new(0x7a10, target);
+        let prior_payload = shapeless_add_payload(item_id, 8, false);
         let mut prior = PacketWrapper::new(
             &crate::packet::mappings::clientbound::play::RECIPE_BOOK_ADD,
-            &shapeless_add_payload(item_id, 8, false),
+            &prior_payload,
         );
         rewrite_recipe_book_add(&mut prior, &mut connection, target).unwrap();
         prior.finish_with_outputs().unwrap();
 
+        let replacement_payload = shapeless_add_payload(item_id, 7, true);
         let mut wrapper = PacketWrapper::new(
             &crate::packet::mappings::clientbound::play::RECIPE_BOOK_ADD,
-            &shapeless_add_payload(item_id, 7, true),
+            &replacement_payload,
         );
         rewrite_recipe_book_add(&mut wrapper, &mut connection, target).unwrap();
         let translated = wrapper.finish_with_outputs().unwrap();
@@ -976,12 +978,13 @@ mod tests {
         let target = V::V_1_16_2;
         let mut connection = UserConnection::new(0x7a11, target);
         let settings = [true, false, false, true, true, true, false, false];
-        let mut wrapper =
-            PacketWrapper::new(&RECIPE_BOOK_SETTINGS_PACKET, &settings_payload(settings));
+        let settings_payload = settings_payload(settings);
+        let mut wrapper = PacketWrapper::new(&RECIPE_BOOK_SETTINGS_PACKET, &settings_payload);
         rewrite_recipe_book_settings(&mut wrapper, &mut connection, V::V_26_3).unwrap();
         assert!(wrapper.finish_with_outputs().unwrap().cancelled);
 
-        let mut wrapper = PacketWrapper::new(&RECIPE_BOOK_REMOVE, &remove_payload(&[23]));
+        let remove_payload = remove_payload(&[23]);
+        let mut wrapper = PacketWrapper::new(&RECIPE_BOOK_REMOVE, &remove_payload);
         rewrite_recipe_book_remove(&mut wrapper, &mut connection, V::V_26_3).unwrap();
         let translated = wrapper.finish().unwrap().unwrap();
         assert!(std::ptr::eq(translated.packet, &UNLOCK_RECIPES));
