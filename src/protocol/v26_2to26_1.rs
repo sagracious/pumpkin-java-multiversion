@@ -13,6 +13,7 @@ use crate::api::types::{
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
 };
+use crate::data::entity_data_types::meta_data_type_id_for_version;
 use crate::data::tracked_index::tracked_index_for_version;
 use crate::packet::mappings::{clientbound, serverbound};
 
@@ -85,21 +86,19 @@ fn sulfur_cube_metadata(
     _ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     let entity_id = wrapper.passthrough(&VAR_INT)?.0;
-    let data = wrapper.read(&EntityDataListT::for_version(connection.version))?;
     let source_type = connection.entity_tracker.entity_type(entity_id);
+    if source_type != Some(EntityType::SULFUR_CUBE.id) {
+        // This handler is registered for the packet as a whole, but only
+        // sulfur cubes need fields removed. Keep other entities' already
+        // target-shaped metadata byte-for-byte.
+        wrapper.passthrough_all();
+        return Ok(());
+    }
+    let data = wrapper.read(&EntityDataListT::for_version(connection.version))?;
     let client_type = connection
         .entity_tracker
         .client_entity_type(entity_id)
         .or(source_type);
-
-    let Some(server_type) = source_type else {
-        wrapper.write(&EntityDataListT::for_version(connection.version), &data)?;
-        return Ok(());
-    };
-    if server_type != EntityType::SULFUR_CUBE.id {
-        wrapper.write(&EntityDataListT::for_version(connection.version), &data)?;
-        return Ok(());
-    }
 
     let remove: Vec<u8> = [19, 20]
         .into_iter()
@@ -114,6 +113,10 @@ fn sulfur_cube_metadata(
     let filtered: Vec<_> = data
         .into_iter()
         .filter(|entry| !remove.contains(&entry.index))
+        .filter_map(|mut entry| {
+            entry.serializer = meta_data_type_id_for_version(entry.serializer, connection.version)?;
+            Some(entry)
+        })
         .collect();
     wrapper.write(&EntityDataListT::for_version(connection.version), &filtered)?;
     Ok(())

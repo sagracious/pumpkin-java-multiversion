@@ -621,6 +621,20 @@ pub fn rewrite_item_value(input: &mut &[u8], layout: V, ids: &ComposedMappings) 
     Some(out)
 }
 
+/// Reads a nested server-to-client stack in `source`'s wire form and stores it
+/// in the canonical 26.3 item form for the later client-version pass.
+#[must_use]
+pub fn read_native_item_value(
+    input: &mut &[u8],
+    source: V,
+    ids: &ComposedMappings,
+) -> Option<Vec<u8>> {
+    let item = ClientboundItemT::new(source, ids).read(input).ok()?;
+    let mut out = Vec::new();
+    ItemT::for_version(V::V_26_3).write(&mut out, &item).ok()?;
+    Some(out)
+}
+
 pub fn item_pass(
     wrapper: &mut PacketWrapper,
     connection: &mut UserConnection,

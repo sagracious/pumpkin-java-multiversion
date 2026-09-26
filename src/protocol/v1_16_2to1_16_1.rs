@@ -18,6 +18,7 @@ use crate::api::types::{
     BOOL, F32T, F64T, I16T, I32T, I64T, NbtT, STRING, TextComponentT, U8, U8T, VAR_INT, WireType,
 };
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
+use crate::data::entity_data_types::meta_data_type_id_for_version;
 use crate::packet::mappings::{clientbound, serverbound};
 
 const MAX_COMMAND_NODES: i32 = 65_536;
@@ -491,24 +492,28 @@ fn piglin_metadata(
     ctx: &Ctx,
 ) -> Result<(), TranslateError> {
     let entity_id = wrapper.passthrough(&VAR_INT)?.0;
-    let list = crate::api::entity_data::EntityDataListT::for_version(ctx.layout);
-    let mut entries = wrapper.read(&list)?;
     let piglins = [
         pumpkin_data::entity::EntityType::PIGLIN.id,
         pumpkin_data::entity::EntityType::PIGLIN_BRUTE.id,
     ];
-    if connection
+    if !connection
         .entity_tracker
         .entity_type(entity_id)
         .is_some_and(|kind| piglins.contains(&kind))
     {
-        for entry in &mut entries {
-            entry.index = match entry.index {
-                15 => 16,
-                16 => 15,
-                index => index,
-            };
-        }
+        wrapper.passthrough_all();
+        return Ok(());
+    }
+    let list = crate::api::entity_data::EntityDataListT::for_version(ctx.layout);
+    let mut entries = wrapper.read(&list)?;
+    for entry in &mut entries {
+        entry.index = match entry.index {
+            15 => 16,
+            16 => 15,
+            index => index,
+        };
+        entry.serializer = meta_data_type_id_for_version(entry.serializer, ctx.layout)
+            .ok_or(TranslateError::Unsupported("piglin metadata serializer"))?;
     }
     wrapper.write(&list, &entries)?;
     Ok(())

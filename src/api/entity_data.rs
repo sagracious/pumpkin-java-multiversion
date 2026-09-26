@@ -4,7 +4,7 @@ use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt, ReadingError, WritingError};
 use pumpkin_util::version::JavaMinecraftVersion;
 
-use crate::api::rewriter::item::rewrite_item_value;
+use crate::api::rewriter::item::read_native_item_value;
 use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle_for_layout};
 use crate::api::types::{F32T, I64T, NbtT, STRING, VAR_INT, VAR_LONG, WireType};
 use crate::data::entity_data_types::{
@@ -197,7 +197,9 @@ fn read_value(
             }
             return Some(MetaValue::Particles(particles));
         }
-        MetaKind::Item => return Some(MetaValue::Item(rewrite_item_value(r, layout, ids)?)),
+        MetaKind::Item => {
+            return Some(MetaValue::Item(read_native_item_value(r, layout, ids)?));
+        }
     };
     Some(MetaValue::Raw(raw))
 }
