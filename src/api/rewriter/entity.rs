@@ -403,6 +403,14 @@ mod tests {
     /// for each layout.
     #[test]
     fn a_pig_is_renumbered_for_every_layout() {
+        let source = pig_list();
+        let mut source_reader = source.as_slice();
+        assert_eq!(VAR_INT.read(&mut source_reader).unwrap().0, 7);
+        let canonical_entries = EntityDataListT::for_version(V::V_26_3)
+            .read(&mut source_reader)
+            .unwrap();
+        assert!(source_reader.is_empty());
+
         let mut v26_2 = vec![7u8, 0, 0, 0x08, 9, 3];
         v26_2.extend(health());
         v26_2.extend([10, 17, 0, 16, 8, 1, 19, 28, 2, TERMINATOR]);
@@ -430,16 +438,20 @@ mod tests {
             (V::V_1_18_2, v1_18_2),
             (V::V_1_16_2, v1_16_2),
         ] {
-            let mut input = pig_list();
-            if layout == V::V_1_21_4 {
-                // 1.21.4 calls the canonical particle-list serializer 18.
-                input[11] = 18;
-            }
-            assert_eq!(
-                translate(&input, EntityType::PIG.id, layout),
-                want,
-                "{layout}"
+            let ids = MappingData::get().composed(layout);
+            let entries = rewrite_entries(
+                EntityType::PIG.id,
+                EntityType::PIG.id,
+                &canonical_entries,
+                layout,
+                ids,
+                0,
             );
+            let mut actual = vec![7u8];
+            EntityDataListT::for_version(layout)
+                .write(&mut actual, &entries)
+                .unwrap();
+            assert_eq!(actual, want, "{layout}");
         }
     }
 
@@ -685,7 +697,7 @@ mod tests {
         let key = 0x656e74_u64;
         crate::api::remove_connection(key);
         // 1.16.2's wire serializer id for float is 2; health is tracked at 8.
-        let mut data = vec![7u8, 0, 0, 8, 2];
+        let mut data = vec![7u8, 0, 0, 0x08, 8, 2];
         data.extend(health());
         data.push(TERMINATOR);
         let before = crate::pipeline::translate_clientbound(
