@@ -589,6 +589,21 @@ pub(crate) fn legacy_jukebox_playable_to_native(
 }
 
 pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Option<&'static str> {
+    if registry_id == "block" && version >= V::V_26_3 {
+        let block_id = pumpkin_data::BlockId::new(u16::try_from(id).ok()?)?;
+        return Some(pumpkin_data::Block::from_id(block_id).name);
+    }
+    if registry_id == "mob_effect" && (version < V::V_1_20_5 || version >= V::V_26_3) {
+        use pumpkin_data::data_component_impl::IDSetContent;
+
+        let effect = pumpkin_data::effect::StatusEffect::from_id(u16::try_from(id).ok()?)?;
+        return Some(
+            effect
+                .minecraft_name
+                .strip_prefix("minecraft:")
+                .unwrap_or(effect.minecraft_name),
+        );
+    }
     let id = usize::try_from(id).ok()?;
     let namespaced_registry_id = format!(
         "minecraft:{}",
@@ -615,6 +630,13 @@ pub(crate) fn registry_entry_name(version: V, registry_id: &str, id: i32) -> Opt
 }
 
 pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Option<i32> {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    if registry_id == "block" && version >= V::V_26_3 {
+        return i32::try_from(pumpkin_data::Block::from_name(name)?.id.as_u16()).ok();
+    }
+    if registry_id == "mob_effect" && (version < V::V_1_20_5 || version >= V::V_26_3) {
+        return Some(i32::from(status_effect_from_name(name)?.id));
+    }
     let namespaced_registry_id = format!(
         "minecraft:{}",
         registry_id
@@ -645,6 +667,14 @@ pub(crate) fn registry_entry_id(version: V, registry_id: &str, name: &str) -> Op
             .position(|entry| entry.name == name)?
     };
     i32::try_from(index).ok()
+}
+
+fn status_effect_from_name(name: &str) -> Option<&'static pumpkin_data::effect::StatusEffect> {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    pumpkin_data::effect::StatusEffect::from_name(name).or_else(|| {
+        let namespaced = format!("minecraft:{name}");
+        pumpkin_data::effect::StatusEffect::from_name(&namespaced)
+    })
 }
 
 /// The 1.21.4-and-older trim component uses two holders and a tooltip flag.
@@ -1605,26 +1635,8 @@ mod tests {
     }
 
     fn registry_value_id(version: V, registry_id: &str, name: &str) -> i32 {
-        let index = if version >= V::V_26_3 {
-            pumpkin_data::registry::REGISTRY_V_26_3
-                .iter()
-                .find(|registry| registry.registry_id == registry_id)
-                .unwrap()
-                .entries
-                .iter()
-                .position(|entry| entry.name == name)
-        } else {
-            crate::registry::generated::get_synced(version)
-                .unwrap()
-                .iter()
-                .find(|registry| registry.registry_id == registry_id)
-                .unwrap()
-                .entries
-                .iter()
-                .position(|entry| entry.name == name)
-        }
-        .unwrap();
-        i32::try_from(index).unwrap()
+        registry_entry_id(version, registry_id, name)
+            .unwrap_or_else(|| panic!("{registry_id} registry contains {name} for {version}"))
     }
 
     #[test]

@@ -1195,10 +1195,11 @@ static CONSUMED_ROOT_TAGS: &[&str] = &[
 
 fn legacy_block_predicates(
     bytes: &[u8],
-    version: V,
+    _version: V,
     ids: &ComposedMappings,
 ) -> Option<Vec<NbtTag>> {
     let mut cursor = bytes;
+    let target_block_ids_inverse = ids.blocks.inverse();
     let count = cursor.get_var_int().ok()?.0;
     if !(0..=4096).contains(&count) {
         return None;
@@ -1213,11 +1214,14 @@ fn legacy_block_predicates(
             } else if selector > 0 && selector <= 4097 {
                 for _ in 0..selector - 1 {
                     let source_id = cursor.get_var_int().ok()?.0;
-                    let Some(target_id) = ids.blocks.map(u32::try_from(source_id).ok()?) else {
+                    let source_id = u32::try_from(source_id).ok()?;
+                    let Some(target_id) = ids.blocks.map(source_id) else {
                         continue;
                     };
-                    let target_id = i32::try_from(target_id).ok()?;
-                    if let Some(name) = registry_entry_name(version, "block", target_id) {
+                    if target_block_ids_inverse.map(target_id) == Some(source_id)
+                        && let Some(name) =
+                            registry_entry_name(V::V_26_3, "block", i32::try_from(source_id).ok()?)
+                    {
                         blocks.push(format!("minecraft:{name}"));
                     }
                 }
