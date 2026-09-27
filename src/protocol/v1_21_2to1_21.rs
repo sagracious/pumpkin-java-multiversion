@@ -1,10 +1,12 @@
-use crate::api::types::{I8, I16, STRING, VAR_INT};
+use crate::api::types::{F32, F64, I8, I16, STRING, U8, VAR_INT};
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
 };
 use crate::packet::mappings::clientbound;
 use pumpkin_data::item::Item;
 use pumpkin_protocol::codec::var_int::VarInt;
+use pumpkin_protocol::java::client::play::CEntityVelocity;
+use pumpkin_protocol::{ClientPacket, PositionFlag, ServerPacket};
 use pumpkin_util::version::JavaMinecraftVersion;
 
 /// The window and slot a container set slot addresses the cursor with.
@@ -23,8 +25,61 @@ impl Protocol for Protocol1_21_2To1_21 {
 
     fn register(&self, reg: &mut Registry) {
         reg.clientbound_layout(&clientbound::play::COOLDOWN, cooldown);
+        reg.clientbound_layout(&clientbound::play::PLAYER_POSITION, player_position);
         reg.clientbound(&clientbound::play::SET_CURSOR_ITEM, cursor_item);
     }
+}
+
+/// 1.21.2 added delta movement and widened the relative flags in the
+/// teleport packet. Older clients keep position/rotation flags and receive
+/// absolute delta as the legacy entity-velocity packet.
+fn player_position(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let mut input = wrapper.remaining();
+    let packet = pumpkin_protocol::java::client::play::CPlayerPosition::read(
+        &mut input,
+        &JavaMinecraftVersion::V_26_3,
+    )?;
+    if !input.is_empty() {
+        return Err(TranslateError::Unsupported("player position trailing data"));
+    }
+
+    let relative_delta = packet.relatives.iter().any(|flag| {
+        matches!(
+            flag,
+            PositionFlag::DeltaX
+                | PositionFlag::DeltaY
+                | PositionFlag::DeltaZ
+                | PositionFlag::RotateDelta
+        )
+    });
+    let mut output = Vec::with_capacity(43);
+    F64.write(&mut output, &packet.position.x)?;
+    F64.write(&mut output, &packet.position.y)?;
+    F64.write(&mut output, &packet.position.z)?;
+    F32.write(&mut output, &packet.yaw)?;
+    F32.write(&mut output, &packet.pitch)?;
+    U8.write(
+        &mut output,
+        &((PositionFlag::get_bitfield(&packet.relatives) as u8) & 0x1f),
+    )?;
+    VAR_INT.write(&mut output, &packet.teleport_id)?;
+    wrapper.replace_remaining(output);
+
+    let delta = packet.delta;
+    if !relative_delta
+        && (delta.x != 0.0 || delta.y != 0.0 || delta.z != 0.0)
+        && let Some(entity_id) = connection.entity_tracker.client_entity_id
+    {
+        let velocity = CEntityVelocity::new(VarInt(entity_id), delta);
+        let mut payload = Vec::new();
+        velocity.write_packet_data(&mut payload, &ctx.step.to)?;
+        wrapper.send_extra(&clientbound::play::SET_ENTITY_MOTION, payload);
+    }
+    Ok(())
 }
 
 /// Cooldowns are per item below 1.21.2, so the group names the item it was put
@@ -181,6 +236,70 @@ mod player_tests {
             );
             assert_eq!(&out.payload[..head.len()], &head[..], "{version}");
             remove_connection(60);
+        }
+    }
+}
+
+#[cfg(test)]
+mod player_position_tests {
+    use super::*;
+    use crate::api::remove_connection;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::PositionFlag;
+    use pumpkin_protocol::java::client::play::CPlayerPosition;
+    use pumpkin_util::math::vector3::Vector3;
+
+    const PLAY: u8 = 5;
+
+    #[test]
+    fn native_teleport_matches_legacy_core_layouts() {
+        let native = CPlayerPosition::new(
+            VarInt(42),
+            Vector3::new(10.0, 65.0, -4.0),
+            Vector3::new(0.0, 0.0, 0.0),
+            90.0,
+            -15.0,
+            vec![PositionFlag::X, PositionFlag::YRot],
+        );
+        let mut source = Vec::new();
+        native
+            .write_packet_data(&mut source, &JavaMinecraftVersion::V_26_3)
+            .unwrap();
+
+        for (index, version) in [
+            JavaMinecraftVersion::V_1_16_2,
+            JavaMinecraftVersion::V_1_16_4,
+            JavaMinecraftVersion::V_1_17,
+            JavaMinecraftVersion::V_1_19_3,
+            JavaMinecraftVersion::V_1_19_4,
+            JavaMinecraftVersion::V_1_20_3,
+            JavaMinecraftVersion::V_1_21,
+            JavaMinecraftVersion::V_1_21_2,
+            JavaMinecraftVersion::V_26_2,
+            JavaMinecraftVersion::V_26_3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = 0x504a_4d30 + index as u64;
+            let translated = translate_clientbound(
+                key,
+                version,
+                PLAY,
+                clientbound::play::PLAYER_POSITION.v26_3,
+                &source,
+            )
+            .unwrap_or_else(|| panic!("{version} teleport was dropped"));
+            let mut expected = Vec::new();
+            native.write_packet_data(&mut expected, &version).unwrap();
+            assert_eq!(
+                translated.packet.to_id(version),
+                clientbound::play::PLAYER_POSITION.to_id(version),
+                "{version} packet id"
+            );
+            assert_eq!(translated.payload, expected, "{version} payload");
+            remove_connection(key);
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::api::rewriter::chat;
-use crate::api::types::{BOOL, F64, I8, I16T, I32, U8, VAR_INT, VAR_LONG, WireType};
+use crate::api::types::{BOOL, F32, F64, I8, I16T, I32, U8, VAR_INT, VAR_LONG, WireType};
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
 use crate::packet::chunk_legacy;
 use crate::packet::mappings::{clientbound, serverbound};
@@ -36,7 +36,25 @@ impl Protocol for Protocol1_17To1_16_4 {
         reg.clientbound_layout(&clientbound::play::PLAYER_COMBAT_ENTER, combat_enter);
         reg.clientbound_layout(&clientbound::play::PLAYER_COMBAT_END, combat_end);
         reg.clientbound_layout(&clientbound::play::PLAYER_COMBAT_KILL, combat_kill);
+        reg.clientbound_layout(&clientbound::play::PLAYER_POSITION, player_position);
     }
+}
+
+/// 1.17 carries an extra dismount flag; 1.16.4 and older do not.
+fn player_position(
+    wrapper: &mut PacketWrapper,
+    _connection: &mut UserConnection,
+    _ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    for _ in 0..3 {
+        wrapper.passthrough(&F64)?;
+    }
+    wrapper.passthrough(&F32)?;
+    wrapper.passthrough(&F32)?;
+    wrapper.passthrough(&U8)?;
+    wrapper.passthrough(&VAR_INT)?;
+    wrapper.read(&BOOL)?;
+    Ok(())
 }
 
 /// 1.17 sends changed slots instead of the clicked stack; nothing here can predict those,

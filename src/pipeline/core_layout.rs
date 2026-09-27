@@ -155,6 +155,9 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::TAG_QUERY, V::V_1_20_2);
         // java/client/play/player_info_update.rs: masks the list priority below 1.21.2 and the hat below 1.21.4.
         put(&clientbound::play::PLAYER_INFO_UPDATE, V::V_1_19_3);
+        // CPlayerPosition switches to the teleport-id-first, delta-movement
+        // layout in 1.21.2; the protocol step rewrites it for older clients.
+        put(&clientbound::play::PLAYER_POSITION, V::V_1_21_2);
         // java/client/play/player_remove.rs: no branch; the packet starts at 1.19.3.
         put(&clientbound::play::PLAYER_INFO_REMOVE, V::V_1_19_3);
         // java/client/play/player_chat_message.rs: no branch beyond the component form, and the global index it always writes starts at 1.21.5.
@@ -263,6 +266,10 @@ mod tests {
         assert_eq!(
             core_layout_floor(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT),
             JavaMinecraftVersion::V_1_18
+        );
+        assert_eq!(
+            core_layout_floor(&clientbound::play::PLAYER_POSITION),
+            JavaMinecraftVersion::V_1_21_2
         );
     }
 
