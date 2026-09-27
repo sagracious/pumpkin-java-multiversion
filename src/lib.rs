@@ -116,10 +116,13 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
             if !is_version_supported(version) {
                 return event;
             }
-            event.translated = true;
-            if state < 2 {
+            // Pumpkin's pending-connection decoder still owns login packet
+            // parsing and branches on the handshake version. These packets
+            // have no PJM payload rewrite, so keep the client layout intact.
+            if state < 4 {
                 return event;
             }
+            event.translated = true;
             match pipeline::translate_serverbound(
                 key,
                 version,
@@ -424,6 +427,37 @@ mod protocol_packet_event_tests {
             let value: serde_json::Value = serde_json::from_str(&json).unwrap();
             assert_eq!(value["version"]["protocol"], 777, "{version}");
             assert_eq!(value["version"]["name"], "1.16.2-26.3", "{version}");
+        }
+    }
+
+    #[test]
+    fn login_start_stays_in_the_negotiated_client_layout() {
+        let version = JavaMinecraftVersion::V_1_16_2;
+        let payload = b"\x09Pae116Bot".to_vec();
+        for connection_state in [2, 3] {
+            let event = ProtocolPacketEventData {
+                connection_id: 0x504a_4d10 + u64::from(connection_state),
+                player: None,
+                direction: PacketDirection::Serverbound,
+                packet_id: serverbound::login::HELLO.to_id(version),
+                raw_payload: payload.clone(),
+                protocol_version: version.protocol_version(),
+                connection_state,
+                translated: false,
+                clientbound_packets: Vec::new(),
+                serverbound_packets: Vec::new(),
+                cancelled: false,
+            };
+
+            let forwarded = translate_protocol_packet(event);
+            assert!(!forwarded.translated, "state {connection_state}");
+            assert!(!forwarded.cancelled, "state {connection_state}");
+            assert_eq!(
+                forwarded.packet_id,
+                serverbound::login::HELLO.to_id(version),
+                "state {connection_state}"
+            );
+            assert_eq!(forwarded.raw_payload, payload, "state {connection_state}");
         }
     }
 
