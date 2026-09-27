@@ -1,4 +1,4 @@
-use crate::api::types::{F32, F64, I8, I16, STRING, U8, VAR_INT};
+use crate::api::types::{F32, F64, I8, I16, STRING, U8, VAR_INT, WireType};
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
 };
