@@ -921,14 +921,15 @@ impl PacketTranslator {
         }
 
         // Generic packet ID translation
-        let client_id = Self::translate_clientbound_packet_id(packet_id, version)?;
-
-        // Pumpkin's 26.3 configuration clear-dialog packet has an empty body.
-        // Do not carry any 26.3-side bytes into the older configuration packet:
-        // vanilla 26.2 rejects them as trailing data while decoding the packet.
+        // NOTE: a 26.3 PLAY packet shares ID 18 with config CLEAR_DIALOG,
+        // and the generic lookup below searches PLAY first, so resolve
+        // CLEAR_DIALOG from its own table before falling through: vanilla
+        // 26.2 expects ID 17 with an empty body and rejects anything else.
         if packet_id == mappings::clientbound::config::CLEAR_DIALOG.v26_3 {
+            let client_id = mappings::clientbound::config::CLEAR_DIALOG.to_id(version)?;
             return Some((client_id, Vec::new()));
         }
+        let client_id = Self::translate_clientbound_packet_id(packet_id, version)?;
 
         Some((client_id, raw_payload.to_vec()))
     }
