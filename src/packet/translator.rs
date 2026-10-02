@@ -95,9 +95,7 @@ mod tests {
     }
 }
 
-pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[
-    &mappings::serverbound::handshake::INTENTION,
-];
+pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[&mappings::serverbound::handshake::INTENTION];
 
 pub static SERVERBOUND_STATUS: &[&PacketId] = &[
     &mappings::serverbound::status::PING_REQUEST,
