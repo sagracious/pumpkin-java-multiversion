@@ -926,8 +926,12 @@ impl PacketTranslator {
         // CLEAR_DIALOG from its own table before falling through: vanilla
         // 26.2 expects ID 17 with an empty body and rejects anything else.
         if packet_id == mappings::clientbound::config::CLEAR_DIALOG.v26_3 {
-            let client_id = mappings::clientbound::config::CLEAR_DIALOG.to_id(version)?;
-            return Some((client_id, Vec::new()));
+            let client_id = mappings::clientbound::config::CLEAR_DIALOG.to_id(version);
+            return if client_id != -1 {
+                Some((client_id, Vec::new()))
+            } else {
+                None
+            };
         }
         let client_id = Self::translate_clientbound_packet_id(packet_id, version)?;
 
