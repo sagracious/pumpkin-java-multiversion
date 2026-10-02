@@ -74,27 +74,6 @@ pub const fn from_wasm_java_version(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clear_dialog_drops_263_payload_for_262_clients() {
-        let translated = PacketTranslator::translate_outgoing_packet(
-            mappings::clientbound::config::CLEAR_DIALOG.v26_3,
-            &[0xAA; 48],
-            JavaMinecraftVersion::V_26_2,
-        )
-        .expect("clear-dialog packet should be mapped for 26.2");
-
-        assert_eq!(
-            translated.0,
-            mappings::clientbound::config::CLEAR_DIALOG.v26_2
-        );
-        assert!(translated.1.is_empty());
-    }
-}
-
 pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[&mappings::serverbound::handshake::INTENTION];
 
 pub static SERVERBOUND_STATUS: &[&PacketId] = &[
@@ -936,5 +915,26 @@ impl PacketTranslator {
         let client_id = Self::translate_clientbound_packet_id(packet_id, version)?;
 
         Some((client_id, raw_payload.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_dialog_drops_263_payload_for_262_clients() {
+        let translated = PacketTranslator::translate_outgoing_packet(
+            mappings::clientbound::config::CLEAR_DIALOG.v26_3,
+            &[0xAA; 48],
+            JavaMinecraftVersion::V_26_2,
+        )
+        .expect("clear-dialog packet should be mapped for 26.2");
+
+        assert_eq!(
+            translated.0,
+            mappings::clientbound::config::CLEAR_DIALOG.v26_2
+        );
+        assert!(translated.1.is_empty());
     }
 }
