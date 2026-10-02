@@ -1,0 +1,142 @@
+name: Build Pumpkin Java multiversion WASM
+
+on:
+  push:
+    branches: ["master", "fix/**", "feat/**"]
+    paths:
+      - "src/**"
+      - "assets/**"
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/build-wasm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pjm-wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  PUMPKIN_COMMIT: 8eeb71bcece8b3a4c5e365d67cc6fdeea326f9ca
+  PUMPKIN_TAG: 0.2.0+26.3-26.51
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pumpkin-java-multiversion
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: sagracious/Pumpkin
+          ref: ${{ env.PUMPKIN_COMMIT }}
+          path: Pumpkin
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: wasm32-wasip2
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.16.0
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+      - name: Check changed Rust formatting
+        working-directory: pumpkin-java-multiversion
+        run: >-
+          rustfmt --edition 2024 --check --config skip_children=true
+          src/api/connection.rs
+          src/api/rewriter/item_backup.rs
+          src/api/rewriter/item_component.rs
+          src/api/rewriter/item_shape.rs
+          src/api/wrapper.rs
+          src/lib.rs
+          src/pipeline/mod.rs
+          src/api/entity_data.rs
+          src/api/rewriter/command.rs
+          src/api/rewriter/entity.rs
+          src/api/rewriter/item.rs
+          src/api/rewriter/item_nbt.rs
+          src/api/rewriter/particle.rs
+          src/api/rewriter/sound.rs
+          src/api/rewriter/screen.rs
+          src/data/entity_data_types.rs
+          src/data/entity_types.rs
+          src/data/mappings.rs
+          src/data/tracked_index.rs
+          src/packet/join.rs
+          src/packet/recipe_book.rs
+          src/packet/recipe_legacy.rs
+          src/packet/mod.rs
+          src/packet/status.rs
+          src/packet/chunk_remap.rs
+          src/packet/chunk_legacy.rs
+          src/packet/update_tags.rs
+          src/pipeline/id_pass.rs
+          src/protocol/mod.rs
+          src/protocol/v1_12_1to1_12.rs
+          src/protocol/v1_12_2to1_12_1.rs
+          src/protocol/v1_12to1_11_1.rs
+          src/protocol/v1_13_1to1_13.rs
+          src/protocol/v1_13_2to1_13_1.rs
+          src/protocol/v1_13to1_12_2.rs
+          src/protocol/v1_14_1to1_14.rs
+          src/protocol/v1_14_2to1_14_1.rs
+          src/protocol/v1_14_3to1_14_2.rs
+          src/protocol/v1_14_4to1_14_3.rs
+          src/protocol/v1_14to1_13_2.rs
+          src/protocol/v1_15_1to1_15.rs
+          src/protocol/v1_15_2to1_15_1.rs
+          src/protocol/v1_15to1_14_4.rs
+          src/protocol/v1_16_1to1_16.rs
+          src/protocol/v1_16_2to1_16_1.rs
+          src/protocol/v1_16_4to1_16_3.rs
+          src/protocol/v1_16to1_15_2.rs
+          src/protocol/v1_18to1_17_1.rs
+          src/protocol/v1_19_3to1_19_1.rs
+          src/protocol/v1_21_4to1_21_2.rs
+          src/protocol/v1_21_9to1_21_7.rs
+          src/protocol/v26_1to1_21_11.rs
+          src/protocol/v26_2to26_1.rs
+          src/protocol/v26_3to26_2.rs
+          src/protocol/v26_3to26_2/block.rs
+          src/protocol/v26_3to26_2/chat.rs
+          src/protocol/v26_3to26_2/entity.rs
+          src/protocol/v26_3to26_2/registry.rs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pumpkin-java-multiversion -> target
+          shared-key: pjm-wasm-pumpkin-0.2-rust-1.98
+      - name: Build WASM
+        working-directory: pumpkin-java-multiversion
+        run: |
+          cargo test --lib --locked
+          cargo build --release --locked --target wasm32-wasip2
+      - name: Show sccache statistics
+        run: sccache --show-stats
+      - name: Package artifact
+        shell: bash
+        run: |
+          wasm=pumpkin-java-multiversion/target/wasm32-wasip2/release/pumpkin_java_multiversion.wasm
+          test -s "$wasm"
+          mkdir -p dist
+          cp "$wasm" dist/pumpkin-java-multiversion-${{ github.sha }}.wasm
+          sha256sum dist/* > dist/SHA256SUMS
+          printf 'source=%s\npumpkin=%s\ntarget=wasm32-wasip2\n' "${{ github.sha }}" "$PUMPKIN_COMMIT" > dist/SOURCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pumpkin-java-multiversion-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
