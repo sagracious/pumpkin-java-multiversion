@@ -183,11 +183,7 @@ fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
         }
     }
     // TEMP DIAG (revert after 26.2 chunk parses).
-    tracing::info!(
-        "DIAG masks_in={:?} arrays_follow={}",
-        lens,
-        cursor.len()
-    );
+    tracing::info!("DIAG masks_in={:?} arrays_follow={}", lens, cursor.len());
     out.extend_from_slice(cursor);
     Some(out)
 }
