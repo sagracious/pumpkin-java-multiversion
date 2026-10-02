@@ -144,6 +144,10 @@ pub fn rewrite_chunk_block_entities(
     out.write_var_int(&VarInt(kept)).ok()?;
     out.extend_from_slice(&entries);
     if version == JavaMinecraftVersion::V_26_2 {
+        // TEMP DIAG (revert after 26.2 chunk parses).
+        tracing::info!("DIAG entities={count} kept={kept}");
+    }
+    if version == JavaMinecraftVersion::V_26_2 {
         out.extend_from_slice(&convert_light_masks_to_long_array(cursor)?);
     } else {
         out.extend_from_slice(cursor);
@@ -156,11 +160,13 @@ pub fn rewrite_chunk_block_entities(
 /// behind the masks stay untouched: the set bits do not change.
 fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    for _ in 0..4 {
+    let mut lens = [0usize; 4];
+    for slot in lens.iter_mut() {
         let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
         if len > cursor.len() {
             return None;
         }
+        *slot = len;
         let (bytes, rest) = cursor.split_at(len);
         cursor = rest;
         let mut padded = bytes.to_vec();
@@ -176,6 +182,12 @@ fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(&word);
         }
     }
+    // TEMP DIAG (revert after 26.2 chunk parses).
+    tracing::info!(
+        "DIAG masks_in={:?} arrays_follow={}",
+        lens,
+        cursor.len()
+    );
     out.extend_from_slice(cursor);
     Some(out)
 }

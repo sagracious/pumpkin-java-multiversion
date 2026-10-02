@@ -233,12 +233,14 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
 
     let mut section_cursor = sections;
     let mut sections_out = Vec::with_capacity(sections.len());
+    let mut section_count = 0usize;
     while !section_cursor.is_empty() {
         // core pads 1.21.5 chunk data with trailing zeros, copy an all-zero tail through untouched
         if section_cursor.iter().all(|&b| b == 0) {
             sections_out.extend_from_slice(section_cursor);
             break;
         }
+        section_count += 1;
         let block_count = section_cursor.get_i16_be().ok()?;
         sections_out.write_i16_be(block_count).ok()?;
 
@@ -270,7 +272,16 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
         .ok()?;
     out.extend_from_slice(&sections_out);
     // The light data behind the block entities needs no renumbering.
-    out.extend_from_slice(&rewrite_chunk_block_entities(rest, version)?);
+    let tail = rewrite_chunk_block_entities(rest, version)?;
+    out.extend_from_slice(&tail);
+    // TEMP DIAG (revert after 26.2 chunk parses): structural summary.
+    if version == JavaMinecraftVersion::V_26_2 {
+        tracing::info!(
+            "DIAG chunk x={chunk_x} z={chunk_z} sections={section_count} in_len={} out_len={}",
+            payload.len(),
+            out.len(),
+        );
+    }
 
     Some(out)
 }
