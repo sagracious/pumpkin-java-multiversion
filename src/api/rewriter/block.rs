@@ -110,8 +110,8 @@ impl WireType for RawNbtT {
 
 /// Renumbers the block entities a 1.18 and newer chunk packet carries and
 /// leaves out the ones the client has no type for. Everything after them, the
-/// light data, is copied as it stands, except the four light masks: 26.3
-/// encodes them as bit sets while older clients parse long arrays.
+/// light data, is copied as it stands, except for 26.2: 26.3 encodes the four
+/// light masks as bit sets while 26.2 parses long arrays.
 #[must_use]
 pub fn rewrite_chunk_block_entities(
     payload: &[u8],
@@ -143,7 +143,7 @@ pub fn rewrite_chunk_block_entities(
     let mut out = Vec::with_capacity(payload.len());
     out.write_var_int(&VarInt(kept)).ok()?;
     out.extend_from_slice(&entries);
-    if version < JavaMinecraftVersion::V_26_3 {
+    if version == JavaMinecraftVersion::V_26_2 {
         out.extend_from_slice(&convert_light_masks_to_long_array(cursor)?);
     } else {
         out.extend_from_slice(cursor);
@@ -152,8 +152,8 @@ pub fn rewrite_chunk_block_entities(
 }
 
 /// Rewrites the four light masks after the block entities from the 26.3
-/// bit-set encoding to the long-array encoding older clients parse. Array
-/// bytes behind the masks stay untouched: the set bits do not change.
+/// bit-set encoding to the long-array encoding 26.2 parses. Array bytes
+/// behind the masks stay untouched: the set bits do not change.
 fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     for _ in 0..4 {
@@ -306,8 +306,7 @@ mod tests {
     }
 
     /// Two block entities and a light tail, the shape core writes from 1.18
-    /// (`net/java/chunk_data/v1_18.rs`). The first light mask carries one
-    /// set bit, so the 26.3 bit-set byte becomes one long for older clients.
+    /// (`net/java/chunk_data/v1_18.rs`).
     #[test]
     fn chunk_block_entities_are_renumbered_and_absent_ones_left_out() {
         let version = JavaMinecraftVersion::V_1_16_2;
@@ -322,12 +321,7 @@ mod tests {
             payload.write_var_int(&VarInt(id)).unwrap();
             payload.write_u8(0).unwrap();
         }
-        payload.write_var_int(&VarInt(1)).unwrap();
-        payload.write_u8(0x01).unwrap();
-        for _ in 0..3 {
-            payload.write_var_int(&VarInt(0)).unwrap();
-        }
-        payload.extend_from_slice(&[0xAA, 0xBB]);
+        payload.extend_from_slice(b"light");
 
         let out = rewrite_chunk_block_entities(&payload, version).unwrap();
         let mut expected = Vec::new();
@@ -340,6 +334,27 @@ mod tests {
             ))
             .unwrap();
         expected.write_u8(0).unwrap();
+        expected.extend_from_slice(b"light");
+        assert_eq!(out, expected);
+    }
+
+    /// The first light mask carries one set bit, so the 26.3 bit-set byte
+    /// becomes one long for 26.2 while the trailing arrays pass through.
+    #[test]
+    fn chunk_light_masks_become_long_arrays_for_26_2() {
+        let version = JavaMinecraftVersion::V_26_2;
+        let mut payload = Vec::new();
+        payload.write_var_int(&VarInt(0)).unwrap();
+        payload.write_var_int(&VarInt(1)).unwrap();
+        payload.write_u8(0x01).unwrap();
+        for _ in 0..3 {
+            payload.write_var_int(&VarInt(0)).unwrap();
+        }
+        payload.extend_from_slice(&[0xAA, 0xBB]);
+
+        let out = rewrite_chunk_block_entities(&payload, version).unwrap();
+        let mut expected = Vec::new();
+        expected.write_var_int(&VarInt(0)).unwrap();
         expected.write_var_int(&VarInt(1)).unwrap();
         expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
         for _ in 0..3 {
