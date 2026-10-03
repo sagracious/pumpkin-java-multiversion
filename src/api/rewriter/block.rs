@@ -208,6 +208,11 @@ fn check_light_arrays(cursor: &[u8]) -> Option<String> {
     }
     None
 }
+
+/// Rewrites the four light masks after the block entities from the 26.3
+/// bit-set encoding to the long-array encoding 26.2 parses. Array bytes
+/// behind the masks stay untouched: the set bits do not change.
+fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut lens = [0usize; 4];
     for slot in lens.iter_mut() {
