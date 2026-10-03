@@ -18,6 +18,7 @@ struct StepStorage {
 
 pub(super) fn register(reg: &mut Registry) {
     reg.clientbound(&clientbound::play::ADD_ENTITY, cushion_spawn);
+    reg.clientbound(&clientbound::play::ENTITY_POSITION_SYNC, position_sync);
 
     reg.serverbound(&serverbound::play::PLAYER_ACTION, player_action);
     reg.serverbound(&serverbound::play::SPECTATE_ENTITY, spectate_entity);
@@ -72,6 +73,60 @@ fn cushion_spawn(
     VAR_INT.write(&mut payload, &VarInt(entity_id))?;
     payload.extend_from_slice(&metadata);
     wrapper.send_extra(&clientbound::play::SET_ENTITY_DATA, payload);
+    Ok(())
+}
+
+/// 26.3 sends a path object where 26.2 expects a position plus a delta
+/// movement. Linear paths carry the position only; stepped paths keep the
+/// last position with movement derived from the final step.
+fn position_sync(
+    wrapper: &mut PacketWrapper,
+    _connection: &mut UserConnection,
+    _ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    const MAX_STEPS: i32 = 1024;
+
+    let path_type = wrapper.read(&VAR_INT)?.0;
+    if path_type == 0 {
+        for _ in 0..3 {
+            wrapper.passthrough(&F64)?;
+        }
+        for _ in 0..3 {
+            wrapper.write(&F64, &0.0f64)?;
+        }
+        return Ok(());
+    }
+
+    let steps = wrapper.read(&VAR_INT)?.0;
+    if steps < 0 || steps > MAX_STEPS {
+        return Err(TranslateError::Unsupported("position sync step count"));
+    }
+    let (mut x, mut y, mut z) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut previous_x, mut previous_y, mut previous_z) = (0.0f64, 0.0f64, 0.0f64);
+    let mut tick_offset = 0i32;
+    for _ in 0..steps {
+        previous_x = x;
+        previous_y = y;
+        previous_z = z;
+        x = wrapper.read(&F64)?;
+        y = wrapper.read(&F64)?;
+        z = wrapper.read(&F64)?;
+        tick_offset = wrapper.read(&VAR_INT)?.0;
+    }
+
+    wrapper.write(&F64, &x)?;
+    wrapper.write(&F64, &y)?;
+    wrapper.write(&F64, &z)?;
+    if steps > 1 && tick_offset > 0 {
+        let ticks = f64::from(tick_offset);
+        wrapper.write(&F64, &((x - previous_x) / ticks))?;
+        wrapper.write(&F64, &((y - previous_y) / ticks))?;
+        wrapper.write(&F64, &((z - previous_z) / ticks))?;
+    } else {
+        for _ in 0..3 {
+            wrapper.write(&F64, &0.0f64)?;
+        }
+    }
     Ok(())
 }
 
@@ -144,7 +199,7 @@ fn complete_teleportation(
 mod tests {
     use super::*;
     use crate::api::{MappingData, Protocol, UserConnection};
-    use crate::packet::mappings::serverbound;
+    use crate::packet::mappings::{clientbound, serverbound};
     use pumpkin_protocol::ser::NetworkWriteExt;
 
     fn ctx(layout: JavaMinecraftVersion) -> Ctx<'static> {
@@ -187,6 +242,55 @@ mod tests {
         }
         assert_eq!(cursor.get_f32_be().unwrap(), 4.0);
         assert_eq!(cursor.get_f32_be().unwrap(), 5.0);
+        assert!(cursor.is_empty());
+    }
+
+    fn position_sync_payload(path_type: i32, steps: &[(f64, f64, f64, i32)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.write_var_int(&VarInt(path_type)).unwrap();
+        if path_type != 0 {
+            payload
+                .write_var_int(&VarInt(i32::try_from(steps.len()).unwrap()))
+                .unwrap();
+        }
+        for (x, y, z, tick) in steps {
+            payload.write_f64_be(*x).unwrap();
+            payload.write_f64_be(*y).unwrap();
+            payload.write_f64_be(*z).unwrap();
+            if path_type != 0 {
+                payload.write_var_int(&VarInt(*tick)).unwrap();
+            }
+        }
+        payload
+    }
+
+    #[test]
+    fn linear_position_sync_gains_zero_movement() {
+        let version = JavaMinecraftVersion::V_26_2;
+        let mut connection = UserConnection::new(7, version);
+        let payload = position_sync_payload(0, &[(1.0, 2.0, 3.0, 0)]);
+        let mut wrapper = PacketWrapper::new(&clientbound::play::ENTITY_POSITION_SYNC, &payload);
+        position_sync(&mut wrapper, &mut connection, &ctx(version)).unwrap();
+        let out = wrapper.finish().unwrap().unwrap();
+        let mut cursor = out.payload.as_slice();
+        for expected in [1.0, 2.0, 3.0, 0.0, 0.0, 0.0] {
+            assert_eq!(cursor.get_f64_be().unwrap(), expected);
+        }
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn stepped_position_sync_keeps_last_position_with_final_delta() {
+        let version = JavaMinecraftVersion::V_26_2;
+        let mut connection = UserConnection::new(8, version);
+        let payload = position_sync_payload(1, &[(0.0, 0.0, 0.0, 2), (10.0, 20.0, 30.0, 5)]);
+        let mut wrapper = PacketWrapper::new(&clientbound::play::ENTITY_POSITION_SYNC, &payload);
+        position_sync(&mut wrapper, &mut connection, &ctx(version)).unwrap();
+        let out = wrapper.finish().unwrap().unwrap();
+        let mut cursor = out.payload.as_slice();
+        for expected in [10.0, 20.0, 30.0, 2.0, 4.0, 6.0] {
+            assert_eq!(cursor.get_f64_be().unwrap(), expected);
+        }
         assert!(cursor.is_empty());
     }
 }
