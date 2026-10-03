@@ -168,10 +168,46 @@ pub fn rewrite_chunk_block_entities(
     Some(out)
 }
 
-/// Rewrites the four light masks after the block entities from the 26.3
-/// bit-set encoding to the long-array encoding 26.2 parses. Array bytes
-/// behind the masks stay untouched: the set bits do not change.
-fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
+/// TEMP DIAG: verifies a translated 26.2 light section the way the vanilla
+/// client reads it (mask popcounts vs array counts, every array 2048 bytes).
+/// Returns the first anomaly found, if any.
+fn check_light_arrays(cursor: &[u8]) -> Option<String> {
+    let mut cursor = cursor;
+    let mut counts = [0usize; 4];
+    for (i, slot) in counts.iter_mut().enumerate() {
+        let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+        if len > cursor.len() {
+            return Some(format!("mask {i} len {len} overruns"));
+        }
+        let (bytes, rest) = cursor.split_at(len);
+        cursor = rest;
+        let mut padded = bytes.to_vec();
+        while padded.len() % 8 != 0 {
+            padded.push(0);
+        }
+        *slot = padded
+            .chunks_exact(8)
+            .map(|c| u64::from_be_bytes(c.try_into().unwrap()).count_ones() as usize)
+            .sum();
+    }
+    for (list, want) in ["sky", "block"].iter().zip([counts[0], counts[1]]) {
+        let count = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+        if count != want {
+            return Some(format!("{list} count {count} != mask bits {want}"));
+        }
+        for _ in 0..count {
+            let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
+            if len != 2048 {
+                return Some(format!("{list} array len {len} != 2048"));
+            }
+            if len > cursor.len() {
+                return Some(format!("{list} array overruns"));
+            }
+            cursor = &cursor[len..];
+        }
+    }
+    None
+}
     let mut out = Vec::new();
     let mut lens = [0usize; 4];
     for slot in lens.iter_mut() {
@@ -198,6 +234,10 @@ fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
     // TEMP DIAG (revert after 26.2 chunk parses).
     tracing::info!("DIAG masks_in={:?} arrays_follow={}", lens, cursor.len());
     out.extend_from_slice(cursor);
+    // TEMP DIAG: validate the translated tail the way a 26.2 client reads it.
+    if let Some(problem) = check_light_arrays(&out) {
+        tracing::info!("DIAG light-anomaly: {problem}");
+    }
     Some(out)
 }
 
