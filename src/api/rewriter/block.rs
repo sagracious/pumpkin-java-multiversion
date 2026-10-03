@@ -121,6 +121,13 @@ pub fn rewrite_chunk_block_entities(
     let nbt = RawNbtT::for_version(version);
     let mut cursor = payload;
     let count = cursor.get_var_int().ok()?.0;
+    // TEMP DIAG: hex around the entities start.
+    {
+        let start = cursor.as_ptr() as usize - payload.as_ptr() as usize;
+        let from = start.saturating_sub(8);
+        let to = (start + 8).min(payload.len());
+        tracing::info!("DIAG entities_at={start} head={:02x?}", &payload[from..to]);
+    }
 
     let mut kept = 0i32;
     let mut entries = Vec::new();
@@ -143,6 +150,12 @@ pub fn rewrite_chunk_block_entities(
     let mut out = Vec::with_capacity(payload.len());
     out.write_var_int(&VarInt(kept)).ok()?;
     out.extend_from_slice(&entries);
+    // TEMP DIAG: hex at the light section start.
+    {
+        let start = cursor.as_ptr() as usize - payload.as_ptr() as usize;
+        let to = (start + 32).min(payload.len());
+        tracing::info!("DIAG light_at={start} head={:02x?}", &payload[start..to]);
+    }
     if version == JavaMinecraftVersion::V_26_2 {
         // TEMP DIAG (revert after 26.2 chunk parses).
         tracing::info!("DIAG entities={count} kept={kept}");
