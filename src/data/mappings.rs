@@ -887,6 +887,16 @@ mod tests {
         assert_eq!(composed.items.map(1657), Some(1657));
     }
 
+    /// TEMP DIAG: vanilla-truth spot check (Via mapping JSON). Oak log is
+    /// 163 on 26.3 and 161 on 26.2; crafting table is 405 on 26.3 and 360
+    /// on 26.2. Revert to a passing regression test once green.
+    #[test]
+    fn temp_diag_spot_item_ids() {
+        let composed = MappingData::get().composed(JavaMinecraftVersion::V_26_2);
+        assert_eq!(composed.items.map(163), Some(161), "oak_log");
+        assert_eq!(composed.items.map(405), Some(360), "crafting_table");
+    }
+
     #[test]
     fn inverse_keeps_the_lowest_id() {
         let mapping = IdMapping(super::Repr::Table(vec![0, 1, 5, 3, 5]));
