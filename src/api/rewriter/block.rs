@@ -121,13 +121,6 @@ pub fn rewrite_chunk_block_entities(
     let nbt = RawNbtT::for_version(version);
     let mut cursor = payload;
     let count = cursor.get_var_int().ok()?.0;
-    // TEMP DIAG: hex around the entities start.
-    {
-        let start = cursor.as_ptr() as usize - payload.as_ptr() as usize;
-        let from = start.saturating_sub(8);
-        let to = (start + 8).min(payload.len());
-        tracing::info!("DIAG entities_at={start} head={:02x?}", &payload[from..to]);
-    }
 
     let mut kept = 0i32;
     let mut entries = Vec::new();
@@ -150,16 +143,6 @@ pub fn rewrite_chunk_block_entities(
     let mut out = Vec::with_capacity(payload.len());
     out.write_var_int(&VarInt(kept)).ok()?;
     out.extend_from_slice(&entries);
-    // TEMP DIAG: hex at the light section start.
-    {
-        let start = cursor.as_ptr() as usize - payload.as_ptr() as usize;
-        let to = (start + 32).min(payload.len());
-        tracing::info!("DIAG light_at={start} head={:02x?}", &payload[start..to]);
-    }
-    if version == JavaMinecraftVersion::V_26_2 {
-        // TEMP DIAG (revert after 26.2 chunk parses).
-        tracing::info!("DIAG entities={count} kept={kept}");
-    }
     if version == JavaMinecraftVersion::V_26_2 {
         out.extend_from_slice(&convert_light_masks_to_long_array(cursor)?);
     } else {
@@ -168,59 +151,16 @@ pub fn rewrite_chunk_block_entities(
     Some(out)
 }
 
-/// TEMP DIAG: verifies a translated 26.2 light section the way the vanilla
-/// client reads it (mask popcounts vs array counts, every array 2048 bytes).
-/// Returns the first anomaly found, if any.
-fn check_light_arrays(cursor: &[u8]) -> Option<String> {
-    let mut cursor = cursor;
-    let mut counts = [0usize; 4];
-    for (i, slot) in counts.iter_mut().enumerate() {
-        let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
-        if len > cursor.len() {
-            return Some(format!("mask {i} len {len} overruns"));
-        }
-        let (bytes, rest) = cursor.split_at(len);
-        cursor = rest;
-        let mut padded = bytes.to_vec();
-        while padded.len() % 8 != 0 {
-            padded.push(0);
-        }
-        *slot = padded
-            .chunks_exact(8)
-            .map(|c| u64::from_be_bytes(c.try_into().unwrap()).count_ones() as usize)
-            .sum();
-    }
-    for (list, want) in ["sky", "block"].iter().zip([counts[0], counts[1]]) {
-        let count = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
-        if count != want {
-            return Some(format!("{list} count {count} != mask bits {want}"));
-        }
-        for _ in 0..count {
-            let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
-            if len != 2048 {
-                return Some(format!("{list} array len {len} != 2048"));
-            }
-            if len > cursor.len() {
-                return Some(format!("{list} array overruns"));
-            }
-            cursor = &cursor[len..];
-        }
-    }
-    None
-}
-
 /// Rewrites the four light masks after the block entities from the 26.3
 /// bit-set encoding to the long-array encoding 26.2 parses. Array bytes
 /// behind the masks stay untouched: the set bits do not change.
 fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    let mut lens = [0usize; 4];
-    for slot in lens.iter_mut() {
+    for _ in 0..4 {
         let len = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
         if len > cursor.len() {
             return None;
         }
-        *slot = len;
         let (bytes, rest) = cursor.split_at(len);
         cursor = rest;
         let mut padded = bytes.to_vec();
@@ -236,13 +176,7 @@ fn convert_light_masks_to_long_array(mut cursor: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(&word);
         }
     }
-    // TEMP DIAG (revert after 26.2 chunk parses).
-    tracing::info!("DIAG masks_in={:?} arrays_follow={}", lens, cursor.len());
     out.extend_from_slice(cursor);
-    // TEMP DIAG: validate the translated tail the way a 26.2 client reads it.
-    if let Some(problem) = check_light_arrays(&out) {
-        tracing::info!("DIAG light-anomaly: {problem}");
-    }
     Some(out)
 }
 

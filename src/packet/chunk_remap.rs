@@ -43,17 +43,6 @@ const MAX_HEIGHTMAP_LONGS: usize = 4096;
 /// Bounds synthesized legacy block entities within Pumpkin's packet-size cap.
 const MAX_CHUNK_BLOCK_ENTITIES: usize = 131_072;
 
-/// TEMP DIAG: first `n` bytes of `data` as hex.
-fn hex_snippet(data: &[u8], n: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(n * 2);
-    for b in data.iter().take(n) {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 15) as usize] as char);
-    }
-    s
-}
-
 /// Number of packed longs for `entry_count` entries at `bits_per_entry`.
 const fn packed_long_count(entry_count: usize, bits_per_entry: u8) -> usize {
     if bits_per_entry == 0 {
@@ -244,14 +233,12 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
 
     let mut section_cursor = sections;
     let mut sections_out = Vec::with_capacity(sections.len());
-    let mut section_count = 0usize;
     while !section_cursor.is_empty() {
         // core pads 1.21.5 chunk data with trailing zeros, copy an all-zero tail through untouched
         if section_cursor.iter().all(|&b| b == 0) {
             sections_out.extend_from_slice(section_cursor);
             break;
         }
-        section_count += 1;
         let block_count = section_cursor.get_i16_be().ok()?;
         sections_out.write_i16_be(block_count).ok()?;
 
@@ -284,21 +271,7 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
     out.extend_from_slice(&sections_out);
     // The light data behind the block entities needs no renumbering.
     let tail = rewrite_chunk_block_entities(rest, version)?;
-    // TEMP DIAG: dump the entities+light region boundaries.
-    if version == JavaMinecraftVersion::V_26_2 {
-        let end = rest.len().min(4096);
-        tracing::info!("DIAG tail_hex={}", hex_snippet(rest, end));
-    }
     out.extend_from_slice(&tail);
-    // TEMP DIAG (revert after 26.2 chunk parses): structural summary.
-    if version == JavaMinecraftVersion::V_26_2 {
-        tracing::info!(
-            "DIAG chunk x={chunk_x} z={chunk_z} sections={section_count} in_len={} out_len={}",
-            payload.len(),
-            out.len(),
-        );
-    }
-
     Some(out)
 }
 

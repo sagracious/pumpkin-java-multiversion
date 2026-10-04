@@ -897,6 +897,16 @@ mod tests {
         assert_eq!(composed.items.map(405), Some(360), "crafting_table");
     }
 
+    /// Same, for blockstates (blockstates arrays, axis=y variants): oak log
+    /// is 140 on 26.3 and 137 on 26.2; birch log is 146 on 26.3 and 143 on
+    /// 26.2.
+    #[test]
+    fn spot_blockstate_ids_match_vanilla_truth() {
+        let composed = MappingData::get().composed(JavaMinecraftVersion::V_26_2);
+        assert_eq!(composed.blockstates.map(140), Some(137), "oak_log");
+        assert_eq!(composed.blockstates.map(146), Some(143), "birch_log");
+    }
+
     #[test]
     fn inverse_keeps_the_lowest_id() {
         let mapping = IdMapping(super::Repr::Table(vec![0, 1, 5, 3, 5]));
