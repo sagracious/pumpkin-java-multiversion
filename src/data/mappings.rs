@@ -887,11 +887,11 @@ mod tests {
         assert_eq!(composed.items.map(1657), Some(1657));
     }
 
-    /// TEMP DIAG: vanilla-truth spot check (Via mapping JSON). Oak log is
-    /// 163 on 26.3 and 161 on 26.2; crafting table is 405 on 26.3 and 360
-    /// on 26.2. Revert to a passing regression test once green.
+    /// Vanilla-truth spot check (ViaVersion/Mappings mapping-26.2.json and
+    /// mapping-26.3.json, items arrays): oak log is 163 on 26.3 and 161 on
+    /// 26.2; crafting table is 405 on 26.3 and 360 on 26.2.
     #[test]
-    fn temp_diag_spot_item_ids() {
+    fn spot_item_ids_match_vanilla_truth() {
         let composed = MappingData::get().composed(JavaMinecraftVersion::V_26_2);
         assert_eq!(composed.items.map(163), Some(161), "oak_log");
         assert_eq!(composed.items.map(405), Some(360), "crafting_table");

@@ -29,12 +29,7 @@ impl StructuredItemRewriter {
             return item.clone();
         };
         let source_item_id = *id;
-        let mapped = map(&ids.items, source_item_id);
-        // TEMP DIAG: trace id mapping for 26.2.
-        if target == V::V_26_2 {
-            tracing::info!("DIAG item {source_item_id} -> {mapped:?}");
-        }
-        let Some(id) = mapped else {
+        let Some(id) = map(&ids.items, source_item_id) else {
             return Item::Empty;
         };
         let fallback_model = u32::try_from(source_item_id)
