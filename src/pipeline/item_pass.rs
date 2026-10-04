@@ -1,6 +1,8 @@
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
-use crate::api::rewriter::item::{ClientItemT, StructuredItemRewriter, item_pass};
+use crate::api::rewriter::item::{
+    ClientItemT, StructuredItemRewriter, item_pass, item_pass_traced,
+};
 use crate::api::rewriter::item_backup::{restore_full_item, rewrite_hashed_item};
 use crate::api::types::{
     BOOL, F32T, HASHED_ITEM, I8, I16T, I32T, I64T, ITEM_COST, STRING, TEMPLATE_ITEM,
@@ -8,14 +10,13 @@ use crate::api::types::{
 };
 use crate::api::{ComposedMappings, PacketWrapper, TranslateError, UserConnection};
 
-/// A varint from 1.21.2, one byte below it.
-fn container_id(wrapper: &mut PacketWrapper, layout: V) -> Result<(), TranslateError> {
-    if layout >= V::V_1_21_2 {
-        wrapper.passthrough(&VAR_INT)?;
+/// A varint from 1.21.2, one byte below it. Returns the window id.
+fn container_id(wrapper: &mut PacketWrapper, layout: V) -> Result<i32, TranslateError> {
+    Ok(if layout >= V::V_1_21_2 {
+        wrapper.passthrough(&VAR_INT)?.0
     } else {
-        wrapper.passthrough(&U8)?;
-    }
-    Ok(())
+        i32::from(wrapper.passthrough(&U8)?)
+    })
 }
 
 pub fn container_content(
@@ -24,7 +25,8 @@ pub fn container_content(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    container_id(wrapper, layout)?;
+    let window = container_id(wrapper, layout)?;
+    let packet = wrapper.packet().v26_3;
     let count = if layout >= V::V_1_17_1 {
         wrapper.passthrough(&VAR_INT)?;
         wrapper.passthrough(&VAR_INT)?.0
@@ -34,11 +36,11 @@ pub fn container_content(
     if !(0..=4096).contains(&count) {
         return Err(TranslateError::Unsupported("container slot count"));
     }
-    for _ in 0..count {
-        item_pass(wrapper, connection, layout, ids)?;
+    for slot in 0..count {
+        item_pass_traced(wrapper, connection, layout, ids, packet, window, slot)?;
     }
     if layout >= V::V_1_17_1 {
-        item_pass(wrapper, connection, layout, ids)?;
+        item_pass_traced(wrapper, connection, layout, ids, packet, window, -1)?;
     }
     Ok(())
 }
@@ -49,12 +51,13 @@ pub fn container_slot(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    container_id(wrapper, layout)?;
+    let window = container_id(wrapper, layout)?;
+    let packet = wrapper.packet().v26_3;
     if layout >= V::V_1_17_1 {
         wrapper.passthrough(&VAR_INT)?;
     }
-    wrapper.passthrough(&I16T)?;
-    item_pass(wrapper, connection, layout, ids)
+    let slot = i32::from(wrapper.passthrough(&I16T)?);
+    item_pass_traced(wrapper, connection, layout, ids, packet, window, slot)
 }
 
 pub fn cursor_item(
@@ -63,7 +66,8 @@ pub fn cursor_item(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    item_pass(wrapper, connection, layout, ids)
+    let packet = wrapper.packet().v26_3;
+    item_pass_traced(wrapper, connection, layout, ids, packet, -1, -1)
 }
 
 pub fn player_inventory(
@@ -72,8 +76,9 @@ pub fn player_inventory(
     layout: V,
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    wrapper.passthrough(&VAR_INT)?;
-    item_pass(wrapper, connection, layout, ids)
+    let packet = wrapper.packet().v26_3;
+    let slot = wrapper.passthrough(&VAR_INT)?.0;
+    item_pass_traced(wrapper, connection, layout, ids, packet, 0, slot)
 }
 
 /// From 1.16 the entries run until one without the continuation bit.
