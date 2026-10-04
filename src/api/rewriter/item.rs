@@ -1013,37 +1013,6 @@ pub fn item_pass(
     wrapper.write(&ItemT::for_version(layout), &out)
 }
 
-/// TEMP DIAG: same as [`item_pass`], but logs the packet, window, and slot
-/// with the ids actually written, so a client-side display can be matched to
-/// the exact wire bytes.
-pub fn item_pass_traced(
-    wrapper: &mut PacketWrapper,
-    connection: &mut UserConnection,
-    layout: V,
-    ids: &ComposedMappings,
-    packet: i32,
-    window: i32,
-    slot: i32,
-) -> Result<(), TranslateError> {
-    let item = wrapper.read(&ClientboundItemT::new(layout, ids))?;
-    let in_id = match &item {
-        Item::Structured { id, .. } => Some(*id),
-        _ => None,
-    };
-    let mut out = StructuredItemRewriter::to_version(&item, layout, ids);
-    super::item_backup::backup_clientbound_item(connection, &item, &mut out, layout, ids);
-    if layout == V::V_26_2 {
-        let (out_id, comps) = match &out {
-            Item::Structured { id, added, .. } => (*id, added.len()),
-            _ => (-1, 0),
-        };
-        tracing::info!(
-            "DIAG slot pkt={packet} win={window} slot={slot} {in_id:?} -> {out_id} n={comps}"
-        );
-    }
-    wrapper.write(&ItemT::for_version(layout), &out)
-}
-
 fn map(mapping: &IdMapping, id: i32) -> Option<i32> {
     let id = u32::try_from(id).ok()?;
     i32::try_from(mapping.map(id)?).ok()
