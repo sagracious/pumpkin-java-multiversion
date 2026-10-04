@@ -1008,8 +1008,23 @@ pub fn item_pass(
     ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     let item = wrapper.read(&ClientboundItemT::new(layout, ids))?;
+    let in_id = match &item {
+        Item::Structured { id, .. } => Some(*id),
+        _ => None,
+    };
     let mut out = StructuredItemRewriter::to_version(&item, layout, ids);
     super::item_backup::backup_clientbound_item(connection, &item, &mut out, layout, ids);
+    // TEMP DIAG: wire capture for 26.2 container slots (packet, in-id, out-id, comps).
+    if layout == V::V_26_2 {
+        let (out_id, comps) = match &out {
+            Item::Structured { id, added, .. } => (*id, added.len()),
+            _ => (-1, 0),
+        };
+        tracing::info!(
+            "DIAG wire pkt={} {in_id:?} -> {out_id} comps={comps}",
+            wrapper.packet().v26_3
+        );
+    }
     wrapper.write(&ItemT::for_version(layout), &out)
 }
 
