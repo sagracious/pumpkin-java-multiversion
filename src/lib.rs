@@ -20,7 +20,7 @@ use pumpkin_plugin_api::{
 };
 
 use crate::api::{bind_player, is_bound, remove_connection, remove_player};
-use crate::packet::mappings::clientbound;
+use crate::packet::mappings::{clientbound, serverbound};
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -228,7 +228,23 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                         event.raw_payload = translated.payload;
                     }
                 }
-                None => event.cancelled = true,
+                None => {
+                    // Pre-1.20.5 clients have no Select Known Packs, but the
+                    // server waits for its response before continuing
+                    // configuration. Answer with an empty pack list so the
+                    // join proceeds; drop everything else unmapped.
+                    if state == 4
+                        && event.packet_id == clientbound::config::SELECT_KNOWN_PACKS.v26_3
+                        && clientbound::config::SELECT_KNOWN_PACKS.to_id(version) < 0
+                    {
+                        event.serverbound_packets.push(PacketTranslationOutput {
+                            packet_id: serverbound::config::SELECT_KNOWN_PACKS.v26_3,
+                            raw_payload: vec![0],
+                        });
+                        event.translated = true;
+                    }
+                    event.cancelled = true;
+                }
             }
         }
     }
@@ -571,5 +587,58 @@ mod protocol_packet_event_tests {
         assert_eq!(translated.clientbound_packets[0].raw_payload, tags);
 
         remove_connection(connection_id);
+    }
+
+    #[test]
+    fn select_known_packs_is_answered_for_pre_1_20_5_clients() {
+        let version = JavaMinecraftVersion::V_1_20_3;
+        let event = ProtocolPacketEventData {
+            connection_id: 0x504a_4d20,
+            player: None,
+            direction: PacketDirection::Clientbound,
+            packet_id: clientbound::config::SELECT_KNOWN_PACKS.v26_3,
+            raw_payload: Vec::new(),
+            protocol_version: version.protocol_version(),
+            connection_state: 4,
+            translated: false,
+            clientbound_packets: Vec::new(),
+            serverbound_packets: Vec::new(),
+            cancelled: false,
+        };
+        let out = translate_protocol_packet(event);
+        assert!(out.cancelled, "client cannot see unknown packets");
+        assert_eq!(out.serverbound_packets.len(), 1);
+        assert_eq!(
+            out.serverbound_packets[0].packet_id,
+            serverbound::config::SELECT_KNOWN_PACKS.v26_3
+        );
+        assert_eq!(out.serverbound_packets[0].raw_payload, vec![0u8]);
+        remove_connection(0x504a_4d20);
+    }
+
+    #[test]
+    fn select_known_packs_passes_through_where_mapped() {
+        let version = JavaMinecraftVersion::V_26_2;
+        let event = ProtocolPacketEventData {
+            connection_id: 0x504a_4d21,
+            player: None,
+            direction: PacketDirection::Clientbound,
+            packet_id: clientbound::config::SELECT_KNOWN_PACKS.v26_3,
+            raw_payload: vec![0u8],
+            protocol_version: version.protocol_version(),
+            connection_state: 4,
+            translated: false,
+            clientbound_packets: Vec::new(),
+            serverbound_packets: Vec::new(),
+            cancelled: false,
+        };
+        let out = translate_protocol_packet(event);
+        assert!(!out.cancelled);
+        assert!(out.serverbound_packets.is_empty());
+        assert_eq!(
+            out.packet_id,
+            clientbound::config::SELECT_KNOWN_PACKS.to_id(version)
+        );
+        remove_connection(0x504a_4d21);
     }
 }
