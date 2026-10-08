@@ -33,32 +33,34 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-        with:
-          path: pumpkin-java-multiversion
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: sagracious/Pumpkin
-          ref: ${{ env.PUMPKIN_COMMIT }}
-          path: Pumpkin
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.98.0
-        with:
-          targets: wasm32-wasip2
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.16.0
+      - parallel:
+          - uses: actions/checkout@v4
+            with:
+              path: pumpkin-java-multiversion
+              persist-credentials: false
+          - uses: actions/checkout@v4
+            with:
+              repository: sagracious/Pumpkin
+              ref: ${{ env.PUMPKIN_COMMIT }}
+              path: Pumpkin
+              persist-credentials: false
+      - parallel:
+          - uses: dtolnay/rust-toolchain@1.98.0
+            with:
+              targets: wasm32-wasip2
+          - name: Set up sccache
+            uses: mozilla-actions/sccache-action@v0.0.11
+            with:
+              version: v0.16.0
+          - uses: Swatinem/rust-cache@v2
+            with:
+              workspaces: pumpkin-java-multiversion -> target
+              shared-key: pjm-wasm-pumpkin-0.2-rust-1.98
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check Rust formatting
         working-directory: pumpkin-java-multiversion
         run: cargo fmt -p pumpkin-java-multiversion -- --check
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: pumpkin-java-multiversion -> target
-          shared-key: pjm-wasm-pumpkin-0.2-rust-1.98
       - name: Build WASM
         working-directory: pumpkin-java-multiversion
         run: |
