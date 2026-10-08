@@ -104,22 +104,6 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
     }
     let state = event.connection_state;
     let key = event.connection_id;
-    // TEMP-DIAG configtrace (1.20.4 brand disconnect): payload-free config packet
-    // sequence trace. REVERT after capture.
-    if state == 4 {
-        let dir = match event.direction {
-            PacketDirection::Serverbound => "S",
-            PacketDirection::Clientbound => "C",
-        };
-        tracing::info!(
-            "DIAGCFG entry {} conn={} client_v{} id={} len={}",
-            dir,
-            key,
-            event.protocol_version,
-            event.packet_id,
-            event.raw_payload.len()
-        );
-    }
     if let Some(player) = event.player.as_ref()
         && !is_bound(key)
     {
@@ -176,13 +160,7 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                         event.raw_payload = translated.payload;
                     }
                 }
-                None => {
-                    // TEMP-DIAG configtrace. REVERT after capture.
-                    if state == 4 {
-                        tracing::info!("DIAGCFG S-cancel conn={} id={}", key, event.packet_id);
-                    }
-                    event.cancelled = true;
-                }
+                None => event.cancelled = true,
             }
         }
         PacketDirection::Clientbound => {
@@ -217,14 +195,6 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
             match translated {
                 Some(translated) => {
                     if !translated.cancelled && translated.packet.to_id(version) < 0 {
-                        // TEMP-DIAG configtrace. REVERT after capture.
-                        if state == 4 {
-                            tracing::info!(
-                                "DIAGCFG C-nomapping conn={} id_in={}",
-                                key,
-                                event.packet_id
-                            );
-                        }
                         event.cancelled = true;
                         return event;
                     }
@@ -252,27 +222,13 @@ fn translate_protocol_packet(mut event: ProtocolPacketEventData) -> ProtocolPack
                             },
                         ));
                     if translated.cancelled {
-                        // TEMP-DIAG configtrace. REVERT after capture.
-                        if state == 4 {
-                            tracing::info!(
-                                "DIAGCFG C-cancel conn={} id_in={}",
-                                key,
-                                event.packet_id
-                            );
-                        }
                         event.cancelled = true;
                     } else {
                         event.packet_id = translated.packet.to_id(version);
                         event.raw_payload = translated.payload;
                     }
                 }
-                None => {
-                    // TEMP-DIAG configtrace. REVERT after capture.
-                    if state == 4 {
-                        tracing::info!("DIAGCFG C-drop conn={} id_in={}", key, event.packet_id);
-                    }
-                    event.cancelled = true;
-                }
+                None => event.cancelled = true,
             }
         }
     }
