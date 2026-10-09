@@ -1,0 +1,11 @@
+# Keep CI action pins and Rust deps moving in reviewable PRs (no auto-merge).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
